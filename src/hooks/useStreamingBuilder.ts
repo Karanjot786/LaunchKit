@@ -12,7 +12,7 @@ import { useState, useCallback, useRef } from "react";
 // =============================================================================
 
 interface StreamEvent {
-    type: "status" | "preview" | "tool_call" | "file_created" | "file_edited" | "message" | "error" | "done";
+    type: "status" | "preview" | "tool_call" | "file_created" | "file_edited" | "message" | "error" | "done" | "install_packages";
     data: unknown;
 }
 
@@ -97,7 +97,12 @@ export function useStreamingBuilder(initialFiles: Record<string, string> = {}) {
         async (
             message: string,
             brandContext: BrandContext,
-            options: { mode?: "fast" | "agentic" } = {}
+            options: {
+                mode?: "fast" | "agentic";
+                strategy?: "fast_json" | "plan_driven" | "template_fill";
+                quality?: "speed" | "balanced" | "high";
+                templateId?: string;
+            } = {}
         ) => {
             // Cancel any existing stream
             if (abortControllerRef.current) {
@@ -128,6 +133,9 @@ export function useStreamingBuilder(initialFiles: Record<string, string> = {}) {
                         brandContext,
                         currentFiles: state.files,
                         mode: options.mode || "fast",
+                        strategy: options.strategy,
+                        quality: options.quality,
+                        templateId: options.templateId,
                     }),
                     signal: controller.signal,
                 });

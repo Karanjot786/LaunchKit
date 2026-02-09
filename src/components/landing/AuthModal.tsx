@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { signInWithGoogle, signInWithGithub, isFirebaseReady } from "@/lib/firebase";
+import { signInWithGoogle, signInWithGithub, isFirebaseReady, getAuthErrorMessage } from "@/lib/firebase";
 import { X } from "lucide-react";
 
 interface AuthModalProps {
@@ -26,7 +26,7 @@ export function AuthModal({ open, onClose, onSuccess }: AuthModalProps) {
             await signInWithGoogle();
             onSuccess();
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Sign in failed");
+            setError(getAuthErrorMessage(err));
         } finally {
             setLoading(null);
         }
@@ -43,7 +43,7 @@ export function AuthModal({ open, onClose, onSuccess }: AuthModalProps) {
             await signInWithGithub();
             onSuccess();
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Sign in failed");
+            setError(getAuthErrorMessage(err));
         } finally {
             setLoading(null);
         }

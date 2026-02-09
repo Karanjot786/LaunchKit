@@ -89,6 +89,45 @@ export async function signInWithGithub() {
     return signInWithPopup(auth, githubProvider);
 }
 
+function getFirebaseAuthErrorCode(error: unknown): string | null {
+    if (!error || typeof error !== "object") {
+        return null;
+    }
+
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") {
+        return code;
+    }
+
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string") {
+        const match = message.match(/\((auth\/[^)]+)\)/);
+        if (match) {
+            return match[1];
+        }
+    }
+
+    return null;
+}
+
+export function getAuthErrorMessage(error: unknown): string | null {
+    const code = getFirebaseAuthErrorCode(error);
+
+    if (code === "auth/popup-closed-by-user") {
+        return null;
+    }
+
+    if (code === "auth/popup-blocked") {
+        return "Popup was blocked. Please allow popups in your browser and try again.";
+    }
+
+    if (code === "auth/unauthorized-domain") {
+        return "This domain is not authorized for Firebase sign-in. Add localhost and your deployed domain in Firebase Authentication > Settings > Authorized domains.";
+    }
+
+    return "Sign in failed. Please try again.";
+}
+
 export async function logout() {
     if (!auth) throw new Error("Firebase not configured");
     return signOut(auth);
@@ -306,4 +345,3 @@ export async function clearVersionHistory(projectId: string): Promise<void> {
 }
 
 export { app };
-

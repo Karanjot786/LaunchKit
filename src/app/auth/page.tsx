@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
 import { motion } from "framer-motion";
+import { getAuthErrorMessage } from "@/lib/firebase";
 
 export default function AuthPage() {
     const { user, loading, signInWithGoogle, signInWithGithub } = useAuth();
@@ -24,7 +26,7 @@ export default function AuthPage() {
             await signInWithGoogle();
             router.push("/dashboard");
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Sign-in failed");
+            setError(getAuthErrorMessage(err));
         } finally {
             setIsSigningIn(false);
         }
@@ -37,7 +39,7 @@ export default function AuthPage() {
             await signInWithGithub();
             router.push("/dashboard");
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Sign-in failed");
+            setError(getAuthErrorMessage(err));
         } finally {
             setIsSigningIn(false);
         }
@@ -132,12 +134,12 @@ export default function AuthPage() {
 
                 {/* Back to home */}
                 <div className="text-center mt-6">
-                    <a
+                    <Link
                         href="/"
                         className="text-zinc-400 hover:text-white text-sm transition-colors"
                     >
                         ← Back to home
-                    </a>
+                    </Link>
                 </div>
             </motion.div>
         </div>

@@ -7,8 +7,16 @@
 
 import { NextRequest } from "next/server";
 import { GoogleGenAI, ThinkingLevel, FunctionCallingConfigMode, Type, Content, Part, FunctionDeclaration } from "@google/genai";
-import { z } from "zod";
 import { ToolExecutor, formatToolResults } from "@/lib/tool-executor";
+import { runBuilderPipeline } from "@/lib/builder/pipeline/orchestrator";
+import type {
+    BuildRequestV2,
+    BrandContext,
+    GenerationQuality,
+    GenerationResult,
+    GenerationStrategy,
+    StreamEvent,
+} from "@/lib/builder/pipeline/types";
 
 // Initialize Gemini
 const ai = new GoogleGenAI({
@@ -18,45 +26,125 @@ const ai = new GoogleGenAI({
 
 const MODEL = "gemini-3-flash-preview";
 const MAX_TURNS = 5;
+const PIPELINE_V2_ENABLED = process.env.BUILDER_PIPELINE_V2 === "true";
+const DEFAULT_STRATEGY: GenerationStrategy = "fast_json";
+const DEFAULT_QUALITY: GenerationQuality = "speed";
 
-// =============================================================================
-// TYPES
-// =============================================================================
+// Retry and fallback configuration
+const MAX_MODEL_RETRIES = 2;
+const RETRY_BACKOFF_MS = [800, 1600];
+const MAX_MALFORMED_FAST_RETRIES = 2;
+const REDUCED_AGENTIC_TURNS = 2;
 
-interface BrandContext {
-    name: string;
-    tagline: string;
-    logo: string | null;
-    colorPalette: {
-        primary: string;
-        secondary: string;
-        accent: string;
-        background: string;
-        text: string;
-    };
-    validation: {
-        category?: { primary: string; targetAudience: string; keywords: string[] };
-        community?: { painPoints: string[] };
-        opportunities?: string[];
-        proposedFeatures?: { title: string; description: string; priority: string }[];
-    };
+// Fallback context types
+type FallbackContext = "direct" | "from_fast_malformed" | "from_fast_incomplete";
+
+function normalizeMode(mode: unknown): "fast" | "agentic" {
+    return mode === "agentic" ? "agentic" : "fast";
 }
 
-interface StreamEvent {
-    type: "status" | "preview" | "tool_call" | "file_created" | "file_edited" | "message" | "error" | "done";
-    data: unknown;
+function normalizeStrategy(strategy: unknown): GenerationStrategy {
+    if (strategy === "plan_driven" || strategy === "template_fill" || strategy === "fast_json") {
+        return strategy;
+    }
+    return DEFAULT_STRATEGY;
 }
 
-interface JsonExtractionResult {
-    fragment: string;
-    isBalanced: boolean;
-    firstOpen: number;
-    endIndex: number;
+function normalizeQuality(quality: unknown): GenerationQuality {
+    if (quality === "balanced" || quality === "high" || quality === "speed") {
+        return quality;
+    }
+    return DEFAULT_QUALITY;
 }
 
-interface FastModeOutput {
-    message: string;
-    files: Record<string, string>;
+function getFastThinkingLevel(quality: GenerationQuality): ThinkingLevel {
+    if (quality === "high") return ThinkingLevel.LOW;
+    if (quality === "balanced") return ThinkingLevel.MINIMAL;
+    return ThinkingLevel.MINIMAL;
+}
+
+function getFastMaxOutputTokens(quality: GenerationQuality): number {
+    if (quality === "high") return 49152;
+    if (quality === "balanced") return 32768;
+    return 24576;
+}
+
+// Transient error detection (includes rate limits)
+function isTransientModelError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const message = error.message.toLowerCase();
+    const transientPatterns = [
+        "fetch failed",
+        "etimedout",
+        "econnreset",
+        "enotfound",
+        "network",
+        "socket hang up",
+        "aborted",
+        "resource_exhausted", // Quota exceeded
+        "429", // Rate limit
+        "quota",
+        "rate limit",
+    ];
+    return transientPatterns.some(pattern => message.includes(pattern));
+}
+
+// Parse retry delay from error message (e.g., "Please retry in 46.081872059s")
+function parseRetryDelay(error: Error): number | null {
+    const match = error.message.match(/retry in (\d+\.?\d*)s/i);
+    if (match) {
+        return Math.ceil(parseFloat(match[1]) * 1000); // Convert to ms
+    }
+    // Also check for retryDelay in JSON error
+    const delayMatch = error.message.match(/"retryDelay"\s*:\s*"(\d+)s"/i);
+    if (delayMatch) {
+        return parseInt(delayMatch[1], 10) * 1000;
+    }
+    return null;
+}
+
+// Retry wrapper for Gemini API calls
+async function generateContentWithRetry(
+    ai: GoogleGenAI,
+    params: Parameters<typeof ai.models.generateContent>[0],
+    label: string,
+    send?: (event: StreamEvent) => void,
+    opts?: { maxRetries?: number }
+): Promise<Awaited<ReturnType<typeof ai.models.generateContent>>> {
+    const maxRetries = opts?.maxRetries ?? MAX_MODEL_RETRIES;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            return await ai.models.generateContent(params);
+        } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+
+            if (!isTransientModelError(error) || attempt >= maxRetries) {
+                throw lastError;
+            }
+
+            // Use API-suggested delay for rate limits, otherwise exponential backoff
+            const suggestedDelay = parseRetryDelay(lastError);
+            const backoffMs = suggestedDelay ?? (RETRY_BACKOFF_MS[attempt] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]);
+
+            const isRateLimit = lastError.message.includes("429") || lastError.message.toLowerCase().includes("quota");
+            const retryType = isRateLimit ? "rate limit" : "transient error";
+
+            console.log(`[${label}] ${retryType}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${maxRetries}):`, lastError.message.slice(0, 100));
+
+            if (send) {
+                const statusMsg = isRateLimit
+                    ? `coding: Rate limited, waiting ${Math.ceil(backoffMs / 1000)}s before retry...`
+                    : `coding: Retrying model call (attempt ${attempt + 2}/${maxRetries + 1})...`;
+                send({ type: "status", data: { status: statusMsg } });
+            }
+
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+        }
+    }
+
+    throw lastError ?? new Error("Unexpected retry exhaustion");
 }
 
 // Tool for writing files in fast mode (Gemini CLI style)
@@ -95,7 +183,42 @@ const completeTool: FunctionDeclaration = {
     },
 };
 
-// =============================================================================
+// Tool to install additional shadcn/ui components
+const installComponentsTool: FunctionDeclaration = {
+    name: "install_components",
+    description: "Install shadcn/ui components. Pre-installed: button, card, input, badge, separator. Request additional components here.",
+    parameters: {
+        type: Type.OBJECT,
+        properties: {
+            components: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "List of shadcn/ui components to install, e.g. ['dialog', 'dropdown-menu', 'tabs']"
+            },
+        },
+        required: ["components"],
+    },
+};
+
+// Tool to install additional npm packages
+const installPackagesTool: FunctionDeclaration = {
+    name: "install_packages",
+    description: `Install npm packages. PRE-INSTALLED packages (do NOT request): react, react-dom, react-router-dom, firebase, lucide-react, framer-motion, clsx, tailwind-merge, class-variance-authority. Only request packages NOT in this list.`,
+    parameters: {
+        type: Type.OBJECT,
+        properties: {
+            packages: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description: "List of npm packages to install, e.g. ['axios', 'date-fns', 'zod']"
+            },
+        },
+        required: ["packages"],
+    },
+};
+
+// Combined fast mode tools
+const fastModeTools: FunctionDeclaration[] = [writeFileTool, completeTool, installComponentsTool, installPackagesTool];
 // TOOL DEFINITIONS (SDK-compatible format)
 // =============================================================================
 
@@ -159,254 +282,154 @@ const codeToolDeclarations: FunctionDeclaration[] = [
 ];
 
 // =============================================================================
-// SYSTEM PROMPT
+// SYSTEM PROMPT (OPTIMIZED - reduced from ~4KB to ~1.5KB)
 // =============================================================================
+
+import { encodeBrandContext, estimateTokenCount } from "@/lib/toon";
 
 function buildSystemPrompt(brand: BrandContext): string {
-    return `You are an expert React developer building a STUNNING, production-ready landing page for ${brand.name}.
+    // Use TOON format for brand context to save tokens
+    // NOTE: Logo intentionally excluded - can be huge base64 data URLs
+    const brandToon = encodeBrandContext({
+        name: brand.name,
+        tagline: brand.tagline,
+        logo: null, // Don't pass logo - handled separately by frontend
+        colorPalette: brand.colorPalette,
+        category: brand.validation.category?.primary,
+        targetAudience: brand.validation.category?.targetAudience,
+        painPoints: brand.validation.community?.painPoints,
+        features: brand.validation.proposedFeatures,
+    });
 
-# CRITICAL: First Impressions Matter
-The user should be WOWED at first glance. Create a design that is beautiful, modern, and premium.
-- Use rich gradients, shadows, and micro-animations
-- Add hover effects, smooth transitions, and subtle motion
-- Make it feel alive and interactive - not flat or boring
-- NO placeholder text - every word should be real ${brand.name} content
+    return `You are an expert React + Firebase full-stack developer. Build complete, production-quality web applications.
 
-# BRAND IDENTITY
-- **Name**: ${brand.name}
-- **Tagline**: ${brand.tagline}
-- **Logo URL**: ${brand.logo || "None - use text fallback"}
-- **Category**: ${brand.validation.category?.primary || "startup"}
-- **Target Audience**: ${brand.validation.category?.targetAudience || "users"}
-- **Pain Points**: ${brand.validation.community?.painPoints?.slice(0, 3).join("; ") || "user needs"}
+═══════════════════════════════════════════════════════════════════════════════
+BRAND CONTEXT (TOON format)
+═══════════════════════════════════════════════════════════════════════════════
+${brandToon}
 
-# COLOR PALETTE (use these EXACT values)
-| Role | Value |
-|------|-------|
-| Primary | ${brand.colorPalette.primary} |
-| Secondary | ${brand.colorPalette.secondary} |
-| Accent | ${brand.colorPalette.accent} |
-| Background | ${brand.colorPalette.background} |
-| Text | ${brand.colorPalette.text} |
+═══════════════════════════════════════════════════════════════════════════════
+AVAILABLE TOOLS
+═══════════════════════════════════════════════════════════════════════════════
+1. install_packages - Install npm packages NOT in pre-installed list
+2. install_components - Install shadcn/ui components NOT in pre-installed list
+3. write_file - Create or update a file (path + content)
+4. complete - Signal generation is done
 
-Create CSS custom properties for these colors and use semantic tokens throughout:
-\`\`\`css
-:root {
-  --color-primary: ${brand.colorPalette.primary};
-  --color-secondary: ${brand.colorPalette.secondary};
-  --color-accent: ${brand.colorPalette.accent};
-  --color-background: ${brand.colorPalette.background};
-  --color-text: ${brand.colorPalette.text};
-  
-  /* Derived tokens - create gradients, shadows, etc */
-  --gradient-primary: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
-  --shadow-glow: 0 0 40px var(--color-primary);
-  --shadow-elegant: 0 10px 30px -10px rgba(0,0,0,0.3);
+═══════════════════════════════════════════════════════════════════════════════
+PRE-INSTALLED (DO NOT REQUEST)
+═══════════════════════════════════════════════════════════════════════════════
+npm: react, react-dom, react-router-dom, firebase, lucide-react, framer-motion, clsx, tailwind-merge, class-variance-authority
+shadcn/ui: button, card, input, badge, separator
+
+═══════════════════════════════════════════════════════════════════════════════
+PROJECT STRUCTURE
+═══════════════════════════════════════════════════════════════════════════════
+PRE-BUILT FILES (already exist, do NOT create):
+├── src/lib/firebase.ts          - Firebase app initialization
+├── src/lib/utils.ts             - cn() utility function
+├── src/contexts/AuthContext.tsx - { useAuth, AuthProvider }
+├── src/hooks/useFirestore.ts    - Firestore CRUD operations
+├── src/hooks/useStorage.ts      - Firebase Storage uploads
+├── src/components/ui/*.tsx      - shadcn/ui components
+└── src/components/auth/         - { LoginForm, SignupForm, ProtectedRoute, UserMenu }
+
+FILES YOU MUST CREATE:
+├── src/App.tsx                  - Main app with routing (REQUIRED)
+├── src/components/Navbar.tsx    - Navigation bar
+├── src/components/Hero.tsx      - Hero section (landing pages)
+├── src/components/Features.tsx  - Features section
+├── src/components/Footer.tsx    - Footer
+└── src/pages/*.tsx              - Any page you reference in routes
+
+═══════════════════════════════════════════════════════════════════════════════
+CRITICAL RULES
+═══════════════════════════════════════════════════════════════════════════════
+★ EVERY IMPORT NEEDS A FILE ★
+If you import a file, you MUST create it with write_file. Example:
+  - import Dashboard from './pages/Dashboard' → MUST write_file("src/pages/Dashboard.tsx")
+  - import Navbar from './components/Navbar' → MUST write_file("src/components/Navbar.tsx")
+
+DO NOT import files from ./pages/ or ./components/ without creating them first!
+Exception: Pre-built files listed above (src/lib/*, src/contexts/*, src/hooks/*, src/components/ui/*, src/components/auth/*)
+
+★ IMPORTS & EXPORTS ★
+- ALWAYS: import React from 'react' (first line of every component)
+- ALWAYS: export default function ComponentName() {} (default exports)
+- NEVER: import from './file.tsx' (no file extensions in imports)
+- For shadcn: import { Button } from "@/components/ui/button"
+- For utils: import { cn } from "@/lib/utils"
+- For auth: import { useAuth } from "@/contexts/AuthContext"
+- For router: import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate } from "react-router-dom"
+
+★ APP.TSX STRUCTURE ★
+main.tsx already wraps with BrowserRouter and AuthProvider. Your App.tsx should NOT include these wrappers.
+Just use Routes directly:
+\`\`\`tsx
+import React from 'react';
+import { Routes, Route } from 'react-router-dom';
+// Import ONLY components you will create with write_file
+import Home from './pages/Home';
+// ...other page imports
+
+export default function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Home />} />
+      {/* Add routes only for pages you create */}
+    </Routes>
+  );
 }
 \`\`\`
+DO NOT wrap with BrowserRouter or AuthProvider - main.tsx handles this!
 
-# FEATURES TO IMPLEMENT
-${brand.validation.proposedFeatures?.map((f, i) => `${i + 1}. **${f.title}** (${f.priority}): ${f.description}`).join("\n") || "Analyze pain points and propose 3 core features."}
+═══════════════════════════════════════════════════════════════════════════════
+FIREBASE INTEGRATION (pre-configured)
+═══════════════════════════════════════════════════════════════════════════════
+Authentication:
+  import { useAuth } from "@/contexts/AuthContext"
+  const { user, loading, signIn, signUp, signInWithGoogle, logout, isConfigured } = useAuth()
 
-# TECH STACK
-- **Framework**: React + Vite with TSX
-- **Styling**: Tailwind CSS (via CDN)
-- **Icons**: lucide-react
-- **Animations**: framer-motion
-- **CDN Dependencies**: react, react-dom, lucide-react, framer-motion
+Firestore Database:
+  import { useFirestore } from "@/hooks/useFirestore"
+  const { data, loading, fetchAll, getById, add, update, remove, subscribe } = useFirestore<Type>("collection")
 
-# ARCHITECTURE RULES
-1. **Split into Components**: Create separate files for each major section:
-   - \`src/components/Navbar.tsx\` - Navigation with logo
-   - \`src/components/Hero.tsx\` - Hero section with CTA
-   - \`src/components/Features.tsx\` - Feature cards grid
-   - \`src/components/CTA.tsx\` - Call-to-action section
-   - \`src/components/Footer.tsx\` - Footer with links
-   - \`src/App.tsx\` - Main app composing all sections
-   - \`src/index.tsx\` - Entry point
-   - \`src/styles.css\` - Global styles with CSS variables
+Storage (File Uploads):
+  import { useStorage } from "@/hooks/useStorage"
+  const { upload, remove, uploading } = useStorage()
 
-2. **Logo Implementation**:
-   ${brand.logo ? `Use the provided logo: \`<img src="${brand.logo}" alt="${brand.name} Logo" className="h-8 w-auto" />\`` : "Use a styled text fallback since no logo is provided."}
+Pre-built Auth Components:
+  import { LoginForm, SignupForm, ProtectedRoute, UserMenu } from "@/components/auth"
 
-3. **Semantic HTML**: Use proper elements (\`<header>\`, \`<main>\`, \`<section>\`, \`<footer>\`, \`<nav>\`)
+═══════════════════════════════════════════════════════════════════════════════
+DESIGN GUIDELINES
+═══════════════════════════════════════════════════════════════════════════════
+- Use brand colors via Tailwind: bg-primary, text-primary-foreground, bg-secondary, etc.
+- Mobile-first responsive: base styles, then sm:, md:, lg:, xl:
+- Add hover/focus states: hover:bg-primary/90, focus:ring-2
+- Use framer-motion for animations: motion.div with initial/animate/transition
+- Use lucide-react for icons: import { IconName } from "lucide-react"
+- NO placeholder content - use real ${brand.name} brand content
 
-4. **Accessibility**: 
-   - Add \`alt\` text to images
-   - Use proper heading hierarchy (h1 → h2 → h3)
-   - Ensure sufficient color contrast
+═══════════════════════════════════════════════════════════════════════════════
+EXECUTION ORDER
+═══════════════════════════════════════════════════════════════════════════════
+1. install_components (if needed beyond pre-installed)
+2. install_packages (if needed beyond pre-installed)
+3. write_file for EACH component/page (create ALL files you import)
+4. complete (with summary message)
 
-5. **Responsive Design**: 
-   - Mobile-first approach
-   - Use Tailwind breakpoints (sm, md, lg, xl)
-   - Test at 375px, 768px, 1024px, 1440px widths
-
-# DESIGN PATTERNS
-✅ DO:
-- Use CSS variables for all brand colors
-- Create gradient backgrounds and button effects
-- Add box-shadow for depth and elevation
-- Use backdrop-blur for glassmorphism effects
-- Add transition-all for smooth hover states
-- Use framer-motion for entrance animations
-
-❌ DON'T:
-- Hard-code colors like \`text-white\` or \`bg-blue-500\`
-- Use generic placeholder content
-- Create flat, boring designs
-- Skip hover/focus states
-- Use default fonts without customization
-
-# OUTPUT INSTRUCTIONS
-Use the provided tools to generate code:
-
-1. **For each file**, call the \`write_file\` tool with:
-   - \`file_path\`: The file path (e.g., "src/App.tsx", "src/components/Hero.tsx")
-   - \`content\`: The complete file content
-
-2. **When all files are written**, call the \`complete\` tool with a brief summary message.
-
-**File Structure to Create:**
-- \`src/index.tsx\` - Entry point
-- \`src/App.tsx\` - Main app composing all sections
-- \`src/components/Navbar.tsx\` - Navigation
-- \`src/components/Hero.tsx\` - Hero section
-- \`src/components/Features.tsx\` - Features grid
-- \`src/components/CTA.tsx\` - Call-to-action
-- \`src/components/Footer.tsx\` - Footer
-- \`src/styles.css\` - Global styles with CSS variables
-
-IMPORTANT: Call write_file for EACH file separately, then call complete at the end.`;
+REMEMBER: Create files in dependency order - create imported files BEFORE the files that import them, OR create all files ensuring every import has a corresponding write_file call.`;
 }
 
-// =============================================================================
-// SSE ENCODER
-// =============================================================================
-
-function extractJsonFragment(text: string): JsonExtractionResult {
-    const cleaned = text.replace(/```json\n?|\n?```/g, "");
-    const firstOpen = cleaned.indexOf("{");
-
-    if (firstOpen === -1) {
-        return {
-            fragment: cleaned,
-            isBalanced: false,
-            firstOpen: -1,
-            endIndex: -1,
-        };
-    }
-
-    let inString = false;
-    let escapeNext = false;
-    let braceDepth = 0;
-    let endIndex = -1;
-
-    for (let i = firstOpen; i < cleaned.length; i++) {
-        const char = cleaned[i];
-
-        if (escapeNext) {
-            escapeNext = false;
-            continue;
-        }
-
-        if (char === "\\") {
-            if (inString) {
-                escapeNext = true;
-            }
-            continue;
-        }
-
-        if (char === "\"") {
-            inString = !inString;
-            continue;
-        }
-
-        if (!inString) {
-            if (char === "{") {
-                braceDepth++;
-            } else if (char === "}") {
-                braceDepth--;
-                if (braceDepth === 0) {
-                    endIndex = i;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (endIndex !== -1) {
-        return {
-            fragment: cleaned.slice(firstOpen, endIndex + 1),
-            isBalanced: true,
-            firstOpen,
-            endIndex,
-        };
-    }
-
-    return {
-        fragment: cleaned.slice(firstOpen),
-        isBalanced: false,
-        firstOpen,
-        endIndex: -1,
-    };
-}
-
-// Helper to repair truncated JSON by closing unterminated strings and braces
-function repairJson(text: string): string {
-    let repaired = text;
-
-    // Count braces and brackets
-    let braceCount = 0;
-    let bracketCount = 0;
-    let inString = false;
-    let escapeNext = false;
-
-    for (let i = 0; i < repaired.length; i++) {
-        const char = repaired[i];
-
-        if (escapeNext) {
-            escapeNext = false;
-            continue;
-        }
-
-        if (char === '\\') {
-            escapeNext = true;
-            continue;
-        }
-
-        if (char === '"') {
-            inString = !inString;
-        } else if (!inString) {
-            if (char === '{') braceCount++;
-            else if (char === '}') braceCount--;
-            else if (char === '[') bracketCount++;
-            else if (char === ']') bracketCount--;
-        }
-    }
-
-    // If text ends with a dangling escape, neutralize it before closing quote
-    if (escapeNext) {
-        repaired += '\\';
-    }
-
-    // If we ended inside a string, close it
-    if (inString) {
-        repaired += '"';
-    }
-
-    // Close any open brackets
-    while (bracketCount > 0) {
-        repaired += ']';
-        bracketCount--;
-    }
-
-    // Close any open braces
-    while (braceCount > 0) {
-        repaired += '}';
-        braceCount--;
-    }
-
-    return repaired;
+/**
+ * Build optimized system prompt and log token metrics
+ */
+function buildSystemPromptWithMetrics(brand: BrandContext): { prompt: string; tokenCount: number } {
+    const prompt = buildSystemPrompt(brand);
+    const tokenCount = estimateTokenCount(prompt);
+    console.log(`[Token Metrics] System prompt: ~${tokenCount} tokens (${prompt.length} chars)`);
+    return { prompt, tokenCount };
 }
 
 // =============================================================================
@@ -422,9 +445,18 @@ function encodeSSE(event: StreamEvent): string {
 // =============================================================================
 
 export async function POST(request: NextRequest) {
-    const { message, brandContext, currentFiles = {}, mode = "fast" } = await request.json();
+    const body = (await request.json()) as BuildRequestV2;
+    const message = body.message;
+    const brandContext = body.brandContext;
+    const currentFiles = body.currentFiles || {};
+    const mode = normalizeMode(body.mode);
+    const requestedStrategy = normalizeStrategy(body.strategy);
+    const quality = normalizeQuality(body.quality);
+    const templateId = body.templateId;
+    const effectiveStrategy = PIPELINE_V2_ENABLED ? requestedStrategy : DEFAULT_STRATEGY;
+    const useLegacyAgenticPath = mode === "agentic" && body.strategy === undefined;
 
-    if (!message) {
+    if (!message || !brandContext) {
         return new Response(JSON.stringify({ error: "Message required" }), {
             status: 400,
             headers: { "Content-Type": "application/json" },
@@ -440,13 +472,50 @@ export async function POST(request: NextRequest) {
             };
 
             try {
-                send({ type: "status", data: { status: "Starting generation..." } });
+                send({ type: "status", data: { status: "planning: Starting generation..." } });
 
-                if (mode === "fast") {
-                    await handleFastMode(message, brandContext, currentFiles, send);
-                } else {
-                    await handleAgenticMode(message, brandContext, currentFiles, send);
+                if (!PIPELINE_V2_ENABLED && requestedStrategy !== DEFAULT_STRATEGY) {
+                    send({
+                        type: "status",
+                        data: { status: "planning: Pipeline V2 is disabled; using fast_json strategy." },
+                    });
                 }
+
+                let result: GenerationResult;
+                if (useLegacyAgenticPath) {
+                    send({ type: "status", data: { status: "coding: Running legacy agentic mode..." } });
+                    result = await handleAgenticMode(message, brandContext, currentFiles, send, quality);
+                } else {
+                    result = await runBuilderPipeline({
+                        ai,
+                        model: MODEL,
+                        message,
+                        brandContext,
+                        currentFiles,
+                        mode,
+                        strategy: effectiveStrategy,
+                        quality,
+                        templateId,
+                        send,
+                        handlers: {
+                            runFast: handleFastMode,
+                            runAgentic: handleAgenticMode,
+                        },
+                    });
+                }
+
+                console.log("Builder stream metrics:", {
+                    strategy: effectiveStrategy,
+                    requestedStrategy,
+                    mode,
+                    quality,
+                    finishReason: result.finishReason || "n/a",
+                    repairAttempts: result.artifacts.repairAttempts,
+                    fallbackPath: result.fallbackPath || "none",
+                    parseStage: result.parseStage || "n/a",
+                    generationDurationMs: result.generationDurationMs || 0,
+                    fileCount: Object.keys(result.files).length,
+                });
 
                 send({ type: "done", data: { success: true } });
             } catch (error) {
@@ -478,16 +547,24 @@ async function handleFastMode(
     message: string,
     brandContext: BrandContext,
     currentFiles: Record<string, string>,
-    send: (event: StreamEvent) => void
-): Promise<void> {
-    send({ type: "status", data: { status: "Generating code with tools..." } });
+    send: (event: StreamEvent) => void,
+    quality: GenerationQuality = DEFAULT_QUALITY
+): Promise<GenerationResult> {
+    send({ type: "status", data: { status: "coding: Generating code with fast tool calls..." } });
 
-    const systemPrompt = buildSystemPrompt(brandContext);
+    // Use optimized system prompt with token metrics
+    const { prompt: systemPrompt, tokenCount: promptTokens } = buildSystemPromptWithMetrics(brandContext);
+
     let filesCreated = 0;
     let completionMessage = "";
     let isComplete = false;
     const MAX_FAST_TURNS = 15; // Safety limit
     let turn = 0;
+    let lastFinishReason = "";
+    let malformedRetries = 0;
+    let totalInputTokens = 0;
+    let componentsInstalled: string[] = [];
+    const changedFiles: Record<string, string> = {};
 
     // Build conversation history for multi-turn
     const contents: Content[] = [
@@ -498,28 +575,37 @@ async function handleFastMode(
     // Using ANY mode forces the model to use tools instead of text responses
     while (!isComplete && turn < MAX_FAST_TURNS) {
         turn++;
-        send({ type: "status", data: { status: `Generating files (turn ${turn})...` } });
+        send({ type: "status", data: { status: `coding: Generating files (turn ${turn})...` } });
 
         try {
-            const response = await ai.models.generateContent({
-                model: MODEL,
-                contents,
-                config: {
-                    systemInstruction: systemPrompt,
-                    tools: [{ functionDeclarations: [writeFileTool, completeTool] }],
-                    toolConfig: {
-                        functionCallingConfig: {
-                            // ANY mode FORCES the model to call a tool (no text-only responses)
-                            mode: FunctionCallingConfigMode.ANY,
+            // Lower temperature on malformed retries for more deterministic output
+            const effectiveTemperature = malformedRetries > 0 ? 0.3 : 0.7;
+
+            const response = await generateContentWithRetry(
+                ai,
+                {
+                    model: MODEL,
+                    contents,
+                    config: {
+                        systemInstruction: systemPrompt,
+                        tools: [{ functionDeclarations: fastModeTools }],
+                        toolConfig: {
+                            functionCallingConfig: {
+                                // ANY mode FORCES the model to call a tool (no text-only responses)
+                                mode: FunctionCallingConfigMode.ANY,
+                                allowedFunctionNames: ["write_file", "complete"],
+                            },
                         },
+                        thinkingConfig: {
+                            thinkingLevel: getFastThinkingLevel(quality),
+                        },
+                        temperature: effectiveTemperature,
+                        maxOutputTokens: getFastMaxOutputTokens(quality),
                     },
-                    thinkingConfig: {
-                        thinkingLevel: ThinkingLevel.MINIMAL,
-                    },
-                    temperature: 0.7,
-                    maxOutputTokens: 32768,
                 },
-            });
+                `Fast Mode Turn ${turn}`,
+                send
+            );
 
             // Get the model's response parts
             const responseParts = response.candidates?.[0]?.content?.parts || [];
@@ -527,6 +613,9 @@ async function handleFastMode(
 
             // DEBUG: Log the full response structure
             const finishReason = response.candidates?.[0]?.finishReason;
+            if (finishReason) {
+                lastFinishReason = finishReason;
+            }
             console.log(`[Fast Mode Debug] Turn ${turn}:`);
             console.log(`  - finishReason: ${finishReason}`);
             console.log(`  - candidates count: ${response.candidates?.length || 0}`);
@@ -557,13 +646,14 @@ async function handleFastMode(
                             const isNew = !currentFiles[filePath];
                             // Update currentFiles for future checks
                             currentFiles[filePath] = content;
+                            changedFiles[filePath] = content;
 
                             send({
                                 type: isNew ? "file_created" : "file_edited",
                                 data: { path: filePath, content, size: content.length },
                             });
                             filesCreated++;
-                            send({ type: "status", data: { status: `Created ${filesCreated} files...` } });
+                            send({ type: "status", data: { status: `coding: Created ${filesCreated} files...` } });
                             console.log(`[Fast Mode] write_file: ${filePath} (${content.length} chars)`);
 
                             // Add tool result to send back
@@ -586,6 +676,47 @@ async function handleFastMode(
                                 response: { success: true, message: completionMessage },
                             },
                         });
+                    } else if (name === "install_components" && args) {
+                        const requestedComponents = (args.components as string[]) || [];
+                        console.log(`[Fast Mode] install_components: ${requestedComponents.join(", ")}`);
+                        send({ type: "status", data: { status: `coding: Installing shadcn/ui components: ${requestedComponents.join(", ")}...` } });
+
+                        // Track which components were requested (actual install happens in WebContainer)
+                        componentsInstalled.push(...requestedComponents);
+
+                        // Add tool result - components will be installed by WebContainer
+                        toolResults.push({
+                            functionResponse: {
+                                name: "install_components",
+                                response: {
+                                    success: true,
+                                    message: `Components ${requestedComponents.join(", ")} queued for installation`,
+                                    components: requestedComponents,
+                                },
+                            },
+                        });
+                    } else if (name === "install_packages" && args) {
+                        const requestedPackages = (args.packages as string[]) || [];
+                        console.log(`[Fast Mode] install_packages: ${requestedPackages.join(", ")}`);
+                        send({ type: "status", data: { status: `coding: Installing npm packages: ${requestedPackages.join(", ")}...` } });
+
+                        // Send install event to frontend - frontend will call E2B API to install
+                        send({
+                            type: "install_packages",
+                            data: { packages: requestedPackages }
+                        });
+
+                        // Add tool result
+                        toolResults.push({
+                            functionResponse: {
+                                name: "install_packages",
+                                response: {
+                                    success: true,
+                                    message: `Packages ${requestedPackages.join(", ")} queued for installation`,
+                                    packages: requestedPackages,
+                                },
+                            },
+                        });
                     }
                 }
             }
@@ -595,10 +726,33 @@ async function handleFastMode(
                 contents.push({ role: "user", parts: toolResults });
             }
 
-            // Safety: if no function calls were made, break
+            // Safety: if no function calls were made, handle with retries
             const hasFunctionCalls = responseParts.some(p => p.functionCall);
             if (!hasFunctionCalls) {
-                console.log("[Fast Mode] No function calls in response, breaking loop");
+                const isMalformed = finishReason === "MALFORMED_FUNCTION_CALL";
+
+                if (isMalformed && malformedRetries < MAX_MALFORMED_FAST_RETRIES) {
+                    malformedRetries++;
+                    console.log(`[Fast Mode] Malformed function call, retrying (attempt ${malformedRetries}/${MAX_MALFORMED_FAST_RETRIES})...`);
+                    send({ type: "status", data: { status: `coding: Retrying after malformed response (attempt ${malformedRetries + 1}/${MAX_MALFORMED_FAST_RETRIES + 1})...` } });
+
+                    // Remove the empty model response if added
+                    if (contents.length > 0 && contents[contents.length - 1].role === "model") {
+                        contents.pop();
+                    }
+
+                    // Add corrective user message
+                    contents.push({
+                        role: "user",
+                        parts: [{ text: "Return only a valid tool call (write_file, complete, or install_components) with all required arguments. Do not return text." }]
+                    });
+
+                    // Don't increment turn for retry, continue loop
+                    turn--;
+                    continue;
+                }
+
+                console.log(`[Fast Mode] No function calls in response (finishReason: ${finishReason}), breaking loop`);
                 break;
             }
 
@@ -613,16 +767,57 @@ async function handleFastMode(
         completionMessage = `Created ${filesCreated} files successfully.`;
     }
 
-    // If no files were created, fall back to agentic mode
-    if (filesCreated === 0) {
-        console.error("[Fast Mode] No files created via tool calls, falling back to agentic mode");
-        send({ type: "status", data: { status: "Tool calling didn't produce files, switching to agentic mode..." } });
-        await handleAgenticMode(message, brandContext, currentFiles, send);
-        return;
+    const shouldFallbackToAgentic = filesCreated === 0 || (lastFinishReason === "MAX_TOKENS" && !isComplete);
+    if (shouldFallbackToAgentic) {
+        // Determine fallback context for logging and reduced turn budget
+        const fallbackContext: FallbackContext = malformedRetries > 0
+            ? "from_fast_malformed"
+            : (lastFinishReason === "MAX_TOKENS" ? "from_fast_incomplete" : "from_fast_malformed");
+
+        console.error("[Fast Mode] Fast generation incomplete; falling back to agentic mode", {
+            filesCreated,
+            lastFinishReason,
+            isComplete,
+            malformedRetries,
+            fallbackContext,
+        });
+
+        send({ type: "status", data: { status: `coding: Fast mode incomplete, switching to agentic mode (${REDUCED_AGENTIC_TURNS} turns)...` } });
+        const fallback = await handleAgenticMode(message, brandContext, currentFiles, send, quality, fallbackContext);
+        return {
+            ...fallback,
+            fallbackPath: "agentic_fallback",
+            parseStage: "agentic_fallback",
+        };
     }
 
     send({ type: "message", data: { text: completionMessage } });
+
+    // Log token metrics summary
+    console.log(`[Token Metrics] Fast Mode Summary:`, {
+        systemPromptTokens: promptTokens,
+        turns: turn,
+        filesCreated,
+        componentsInstalled: componentsInstalled.length > 0 ? componentsInstalled : "none",
+    });
+
     console.log(`[Fast Mode] Complete: ${filesCreated} files created in ${turn} turns`);
+    return {
+        files: { ...changedFiles },
+        message: completionMessage,
+        artifacts: {
+            repairAttempts: 0,
+            strategyUsed: "fast_json",
+            tokenMetrics: {
+                systemPromptTokens: promptTokens,
+                turns: turn,
+            },
+            componentsInstalled,
+        },
+        finishReason: lastFinishReason || "STOP",
+        fallbackPath: "none",
+        parseStage: "tool_calling",
+    };
 }
 
 // =============================================================================
@@ -633,8 +828,10 @@ async function handleAgenticMode(
     message: string,
     brandContext: BrandContext,
     currentFiles: Record<string, string>,
-    send: (event: StreamEvent) => void
-): Promise<void> {
+    send: (event: StreamEvent) => void,
+    quality: GenerationQuality = DEFAULT_QUALITY,
+    fallbackContext: FallbackContext = "direct"
+): Promise<GenerationResult> {
     const executor = new ToolExecutor(currentFiles);
     const systemPrompt = buildSystemPrompt(brandContext);
 
@@ -642,102 +839,167 @@ async function handleAgenticMode(
         { role: "user", parts: [{ text: message }] },
     ];
 
+    // Use reduced turn budget when called as fallback from fast mode
+    const maxTurns = fallbackContext === "direct" ? MAX_TURNS : REDUCED_AGENTIC_TURNS;
+    console.log(`[Agentic Mode] Starting with maxTurns=${maxTurns}, fallbackContext=${fallbackContext}`);
+
     let turn = 0;
     let isComplete = false;
+    const changedFiles: Record<string, string> = {};
+    let finalMessage = "";
+    let lastFinishReason = "";
+    let modelRetryCount = 0;
 
-    while (turn < MAX_TURNS && !isComplete) {
+    while (turn < maxTurns && !isComplete) {
         turn++;
-        send({ type: "status", data: { status: `Turn ${turn}/${MAX_TURNS}...` } });
+        send({ type: "status", data: { status: `coding: Turn ${turn}/${maxTurns}...` } });
 
-        const response = await ai.models.generateContent({
-            model: MODEL,
-            contents,
-            config: {
-                systemInstruction: systemPrompt,
-                tools: [{ functionDeclarations: codeToolDeclarations }],
-                toolConfig: {
-                    functionCallingConfig: {
-                        mode: FunctionCallingConfigMode.AUTO,
+        try {
+            const response = await generateContentWithRetry(
+                ai,
+                {
+                    model: MODEL,
+                    contents,
+                    config: {
+                        systemInstruction: systemPrompt,
+                        tools: [{ functionDeclarations: codeToolDeclarations }],
+                        toolConfig: {
+                            functionCallingConfig: {
+                                mode: FunctionCallingConfigMode.AUTO,
+                            },
+                        },
+                        thinkingConfig: {
+                            thinkingLevel: quality === "high"
+                                ? (turn === 1 ? ThinkingLevel.MEDIUM : ThinkingLevel.LOW)
+                                : ThinkingLevel.LOW,
+                        },
                     },
                 },
-                thinkingConfig: {
-                    thinkingLevel: turn === 1 ? ThinkingLevel.MEDIUM : ThinkingLevel.LOW,
-                },
-            },
-        });
+                `Agentic Mode Turn ${turn}`,
+                send
+            );
 
-        const parts = response.candidates?.[0]?.content?.parts || [];
-
-        // Extract function calls
-        const functionCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
-        for (const part of parts) {
-            if ("functionCall" in part && part.functionCall) {
-                functionCalls.push({
-                    name: part.functionCall.name || "",
-                    args: (part.functionCall.args || {}) as Record<string, unknown>,
-                });
+            const finishReason = response.candidates?.[0]?.finishReason;
+            if (finishReason) {
+                lastFinishReason = finishReason;
             }
-        }
+            const parts = response.candidates?.[0]?.content?.parts || [];
 
-        if (functionCalls.length > 0) {
-            // Process each function call
-            const results = [];
-            for (const call of functionCalls) {
-                send({ type: "tool_call", data: { name: call.name } });
-
-                const result = await executor.execute(call);
-                results.push(result);
-
-                // Send file events
-                if (call.name === "create_files" && call.args.files) {
-                    const files = call.args.files as Record<string, string>;
-                    for (const [path, content] of Object.entries(files)) {
-                        send({ type: "file_created", data: { path, content, size: content.length } });
-                    }
-                } else if (call.name === "edit_file") {
-                    send({
-                        type: "file_edited",
-                        data: {
-                            path: call.args.file_path,
-                            explanation: call.args.explanation,
-                        },
+            // Extract function calls
+            const functionCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+            for (const part of parts) {
+                if ("functionCall" in part && part.functionCall) {
+                    functionCalls.push({
+                        name: part.functionCall.name || "",
+                        args: (part.functionCall.args || {}) as Record<string, unknown>,
                     });
                 }
             }
 
-            // Add model response to conversation
-            contents.push({
-                role: "model",
-                parts: parts,
-            });
+            if (functionCalls.length > 0) {
+                // Process each function call
+                const results = [];
+                for (const call of functionCalls) {
+                    send({ type: "tool_call", data: { name: call.name } });
 
-            // Add function results
-            contents.push({
-                role: "user",
-                parts: formatToolResults(results).map(r => ({
-                    functionResponse: r.functionResponse,
-                })) as Part[],
-            });
-        } else {
-            // No function calls - check for text (completion)
-            const textPart = parts.find(p => "text" in p && p.text);
-            if (textPart && "text" in textPart) {
-                send({ type: "message", data: { text: textPart.text } });
+                    const result = await executor.execute(call);
+                    results.push(result);
+
+                    // Send file events
+                    if (call.name === "create_files" && call.args.files) {
+                        const files = call.args.files as Record<string, string>;
+                        for (const [path, content] of Object.entries(files)) {
+                            currentFiles[path] = content;
+                            changedFiles[path] = content;
+                            send({ type: "file_created", data: { path, content, size: content.length } });
+                        }
+                    } else if (call.name === "edit_file") {
+                        const editedPath = String(call.args.file_path || "");
+                        const latestFiles = executor.getFiles();
+                        const editedContent = editedPath ? latestFiles[editedPath] : undefined;
+                        if (editedPath && typeof editedContent === "string") {
+                            currentFiles[editedPath] = editedContent;
+                            changedFiles[editedPath] = editedContent;
+                        }
+                        send({
+                            type: "file_edited",
+                            data: {
+                                path: call.args.file_path,
+                                content: editedContent,
+                                explanation: call.args.explanation,
+                            },
+                        });
+                    }
+                }
+
+                // Add model response to conversation
+                contents.push({
+                    role: "model",
+                    parts: parts,
+                });
+
+                // Add function results
+                contents.push({
+                    role: "user",
+                    parts: formatToolResults(results).map(r => ({
+                        functionResponse: r.functionResponse,
+                    })) as Part[],
+                });
+            } else {
+                // No function calls - check for text (completion)
+                const textPart = parts.find(p => "text" in p && p.text);
+                if (textPart && "text" in textPart) {
+                    finalMessage = textPart.text || "";
+                    send({ type: "message", data: { text: finalMessage } });
+                } else {
+                    finalMessage = "Agentic generation complete.";
+                }
+                isComplete = true;
             }
-            isComplete = true;
+        } catch (error) {
+            modelRetryCount++;
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            console.error(`[Agentic Mode] Error on turn ${turn}:`, errorMessage);
+
+            // If we have files changed already, return partial success
+            if (Object.keys(changedFiles).length > 0) {
+                console.log(`[Agentic Mode] Returning partial success with ${Object.keys(changedFiles).length} files`);
+                finalMessage = `Partial generation complete (${Object.keys(changedFiles).length} files created). Some errors occurred.`;
+                send({ type: "message", data: { text: finalMessage } });
+                break;
+            }
+
+            // No files changed, this is a complete failure
+            throw new Error(`Agentic fallback failed after retries (${errorMessage})`);
         }
     }
 
     // Send final status
     const finalFiles = executor.getFiles();
+    if (!finalMessage) {
+        finalMessage = `Agentic generation complete in ${turn} turns.`;
+        send({ type: "message", data: { text: finalMessage } });
+    }
     send({
         type: "status",
         data: {
-            status: "Complete",
+            status: "finalizing: Complete",
             fileCount: Object.keys(finalFiles).length,
             turns: turn,
         },
     });
+
+    return {
+        files: finalFiles,
+        message: finalMessage,
+        artifacts: {
+            repairAttempts: 0,
+            strategyUsed: "fast_json",
+        },
+        finishReason: lastFinishReason || "STOP",
+        fallbackPath: "none",
+        parseStage: "tool_calling",
+    };
 }
 
 // =============================================================================

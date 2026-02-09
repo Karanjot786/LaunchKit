@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { PreviewTab } from "./PreviewTab";
-import { CodeTab } from "./CodeTab";
+import { V0CodeView } from "./V0CodeView";
 import { BrandPanel } from "./BrandPanel";
 import { BrandSetupPreview } from "./BrandSetupPreview";
 import { StreamingStatus } from "./StreamingStatus";
@@ -11,7 +11,7 @@ import { VersionHistoryPanel } from "./VersionHistoryPanel";
 import { ExportPanel } from "./ExportPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { initializeWebContainer, writeFiles } from "@/lib/webcontainer";
+import { E2BSandbox, getTemplateFiles } from "@/lib/e2b-client";
 import { useVersionHistory } from "@/lib/version-history";
 import { useStreamingBuilder } from "@/hooks/useStreamingBuilder";
 
@@ -127,6 +127,22 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
     const [isLoading, setIsLoading] = useState(false);
     const [thinkingTime, setThinkingTime] = useState(0);
 
+    // Load template files on mount so code view shows the base template
+    useEffect(() => {
+        async function loadTemplateFiles() {
+            try {
+                const templateFiles = await getTemplateFiles();
+                if (Object.keys(templateFiles).length > 0) {
+                    // Merge template files with existing files (existing files take priority)
+                    setFiles(prev => ({ ...templateFiles, ...prev }));
+                }
+            } catch (error) {
+                console.error("[BuilderLayout] Error loading template files:", error);
+            }
+        }
+        loadTemplateFiles();
+    }, []);
+
     // Brand Panel state
     const [brandPanelCollapsed, setBrandPanelCollapsed] = useState(false);
     const [currentBrand, setCurrentBrand] = useState(brandContext);
@@ -145,11 +161,18 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
     const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "unsaved">("saved");
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+
+    // E2B Sandbox ref
+    const e2bSandboxRef = useRef<E2BSandbox | null>(null);
+    const [useE2B, setUseE2B] = useState(true); // Try E2B first
+    const [isSandboxReady, setIsSandboxReady] = useState(false); // Track sandbox readiness
+    const e2bServerStartedRef = useRef(false); // Prevent multiple startDevServer calls
+
     // Streaming state
     const streaming = useStreamingBuilder(initialFiles);
     const lastUpdateCountRef = useRef(0);
 
-    // Sync streaming files to local state and WebContainer
+    // Sync streaming files to local state and sandbox (E2B or WebContainer)
     useEffect(() => {
         if (streaming.fileUpdates.length > lastUpdateCountRef.current) {
             const newUpdates = streaming.fileUpdates.slice(lastUpdateCountRef.current);
@@ -164,16 +187,62 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
 
             if (Object.keys(updatesToApply).length > 0) {
                 setFiles((prev) => ({ ...prev, ...updatesToApply }));
-
-                // Write to WebContainer immediately
-                if (isContainerReady) {
-                    writeFiles(updatesToApply).catch(console.error);
-                }
-
-                // Debounce full project save is handled by the other useEffect
+                // Files are written to E2B in the startE2BServer effect after streaming completes
             }
         }
-    }, [streaming.fileUpdates, streaming.files, isContainerReady]);
+    }, [streaming.fileUpdates, streaming.files, isContainerReady, useE2B]);
+
+    // Start E2B dev server after streaming completes
+    useEffect(() => {
+        // Only run when: streaming done, E2B enabled, sandbox ready, have files, server not started yet
+        if (
+            !streaming.isStreaming &&
+            useE2B &&
+            isSandboxReady &&
+            Object.keys(files).length > 0 &&
+            !e2bServerStartedRef.current
+        ) {
+            const startE2BServer = async () => {
+                const sandbox = e2bSandboxRef.current;
+                if (!sandbox || !sandbox.isReady) {
+                    console.log("[E2B] Sandbox not ready yet, waiting...");
+                    return;
+                }
+
+                // Mark as started to prevent duplicate calls
+                e2bServerStartedRef.current = true;
+
+                console.log("[E2B] Writing files to sandbox...", Object.keys(files));
+                setContainerStatus("Writing files to E2B...");
+
+                const filesWritten = await sandbox.writeFiles(files);
+
+                if (filesWritten) {
+                    console.log("[E2B] Files written, starting dev server...");
+                    setContainerStatus("Installing dependencies...");
+
+                    const url = await sandbox.startDevServer();
+
+                    if (url) {
+                        console.log(`[E2B] Preview ready: ${url}`);
+                        setPreviewUrl(url);
+                        setIsContainerReady(true);
+                        setContainerStatus("Ready");
+                    } else {
+                        console.error("[E2B] Failed to start dev server");
+                        setContainerStatus("Error starting server");
+                        e2bServerStartedRef.current = false; // Allow retry
+                    }
+                } else {
+                    console.error("[E2B] Failed to write files");
+                    setContainerStatus("Error writing files");
+                    e2bServerStartedRef.current = false; // Allow retry
+                }
+            };
+
+            startE2BServer();
+        }
+    }, [streaming.isStreaming, useE2B, isSandboxReady, files]);
 
     // Version history with Firebase persistence
     const { snapshots, canUndo, canRedo, isLoading: historyLoading, createSnapshot, clearHistory, undoChanges, redoChanges, restoreSnapshot } = useVersionHistory(files, { projectId });
@@ -211,48 +280,59 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         };
     }, [files, onProjectUpdate]);
 
-    // Initialize WebContainer on mount
+    // Initialize sandbox on mount (E2B first, WebContainer fallback)
     useEffect(() => {
         if (containerInitialized.current) return;
         containerInitialized.current = true;
 
         const init = async () => {
-            try {
-                const { checkCrossOriginIsolation } = await import("@/lib/webcontainer");
-                const isolation = checkCrossOriginIsolation();
+            // Try E2B first
+            if (useE2B) {
+                try {
+                    setContainerStatus("Creating E2B sandbox...");
+                    console.log("[LaunchPad] Creating E2B cloud sandbox...");
 
-                if (!isolation.isolated) {
-                    setContainerStatus("Headers not configured - using fallback");
-                    return;
-                }
+                    const sandbox = new E2BSandbox({
+                        onStatusChange: setContainerStatus,
+                        onUrlChange: (url) => {
+                            if (url) {
+                                console.log("[E2B] URL received:", url);
+                                setPreviewUrl(url);
+                                setIsContainerReady(true);
+                            }
+                        },
+                        onOutput: (msg) => {
+                            console.log("[E2B]", msg);
+                        },
+                    });
 
-                await initializeWebContainer(
-                    (url) => {
-                        setPreviewUrl(url);
-                        setContainerStatus("Ready");
-                        setIsContainerReady(true);
-                    },
-                    (status) => {
-                        setContainerStatus(status);
+                    e2bSandboxRef.current = sandbox;
+
+                    const success = await sandbox.initialize();
+                    if (success) {
+                        console.log("[LaunchPad] E2B sandbox ready! Setting isSandboxReady=true");
+                        setIsSandboxReady(true); // This triggers the file writing effect
+                        setContainerStatus("Sandbox ready, waiting for code...");
+                        return;
                     }
-                );
-            } catch (error) {
-                console.error("WebContainer init error:", error);
-                setContainerStatus(`Error: ${error instanceof Error ? error.message : "Unknown"}`);
+                } catch (error) {
+                    console.error("E2B init error:", error);
+                    setUseE2B(false);
+                }
+            }
+
+            // Skip WebContainer fallback - E2B is the only supported runtime now
+            // WebContainer requires COOP/COEP headers which break E2B iframes
+            if (!useE2B) {
+                setContainerStatus("E2B failed, no fallback available");
+                console.error("E2B failed and WebContainer fallback is disabled");
             }
         };
 
         init();
-    }, []);
+    }, [useE2B]);
 
-    // Write initial files to WebContainer when it becomes ready
-    const initialFilesWritten = useRef(false);
-    useEffect(() => {
-        if (isContainerReady && Object.keys(initialFiles).length > 0 && !initialFilesWritten.current) {
-            initialFilesWritten.current = true;
-            writeFiles(initialFiles).catch(console.error);
-        }
-    }, [isContainerReady, initialFiles]);
+    // Initial files are handled by E2B sandbox creation
 
     // Auto-trigger validation if no validation data exists
     const validationTriggered = useRef(false);
@@ -489,6 +569,10 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                 // Default: Use streaming builder for code generation
                 // Clear version history for fresh generation (prevents file accumulation)
                 await clearHistory();
+
+                // Reset E2B server started flag for new generation
+                e2bServerStartedRef.current = false;
+
                 await streaming.generate(content, currentBrand, { mode: "fast" });
 
                 // After streaming completes
@@ -528,8 +612,10 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         setFiles((prev) => ({ ...prev, [file]: content }));
         streaming.updateFile(file, content);
 
-        if (isContainerReady) {
-            await writeFiles({ [file]: content });
+        // Write to E2B sandbox if available
+        const sandbox = e2bSandboxRef.current;
+        if (sandbox && sandbox.isReady) {
+            await sandbox.writeFiles({ [file]: content });
         }
     };
 
@@ -581,11 +667,12 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                             variant="ghost"
                             size="sm"
                             className={`text-zinc-400 hover:text-white ${!canUndo ? "opacity-50 cursor-not-allowed" : ""}`}
-                            onClick={() => {
+                            onClick={async () => {
                                 const restored = undoChanges();
                                 if (restored) {
                                     setFiles(restored);
-                                    if (isContainerReady) writeFiles(restored);
+                                    const sandbox = e2bSandboxRef.current;
+                                    if (sandbox?.isReady) sandbox.writeFiles(restored);
                                 }
                             }}
                             disabled={!canUndo}
@@ -599,11 +686,12 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                             variant="ghost"
                             size="sm"
                             className={`text-zinc-400 hover:text-white ${!canRedo ? "opacity-50 cursor-not-allowed" : ""}`}
-                            onClick={() => {
+                            onClick={async () => {
                                 const restored = redoChanges();
                                 if (restored) {
                                     setFiles(restored);
-                                    if (isContainerReady) writeFiles(restored);
+                                    const sandbox = e2bSandboxRef.current;
+                                    if (sandbox?.isReady) sandbox.writeFiles(restored);
                                 }
                             }}
                             disabled={!canRedo}
@@ -627,6 +715,7 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                         </svg>
                         History
                     </Button>
+
                     <Button
                         variant="ghost"
                         size="sm"
@@ -747,11 +836,13 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                             />
                         )
                     ) : (
-                        <CodeTab
+                        <V0CodeView
                             files={files}
-                            activeFile={activeFile}
                             onFileSelect={setActiveFile}
-                            onFileChange={handleFileChange}
+                            onFileChange={(path, content) => {
+                                setFiles(prev => ({ ...prev, [path]: content }));
+                                setSaveStatus("unsaved");
+                            }}
                         />
                     )}
 
@@ -762,6 +853,8 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                         fileUpdates={streaming.fileUpdates}
                         toolCalls={streaming.toolCalls}
                     />
+
+
                 </div>
             </div>
 
@@ -770,28 +863,31 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                 snapshots={snapshots}
                 canUndo={canUndo}
                 canRedo={canRedo}
-                onUndo={() => {
+                onUndo={async () => {
                     const restored = undoChanges();
                     if (restored) {
                         setFiles(restored);
                         streaming.setFiles(restored);
-                        if (isContainerReady) writeFiles(restored);
+                        const sandbox = e2bSandboxRef.current;
+                        if (sandbox?.isReady) sandbox.writeFiles(restored);
                     }
                 }}
-                onRedo={() => {
+                onRedo={async () => {
                     const restored = redoChanges();
                     if (restored) {
                         setFiles(restored);
                         streaming.setFiles(restored);
-                        if (isContainerReady) writeFiles(restored);
+                        const sandbox = e2bSandboxRef.current;
+                        if (sandbox?.isReady) sandbox.writeFiles(restored);
                     }
                 }}
-                onRestore={(index) => {
+                onRestore={async (index) => {
                     const restored = restoreSnapshot(index);
                     if (restored) {
                         setFiles(restored);
                         streaming.setFiles(restored);
-                        if (isContainerReady) writeFiles(restored);
+                        const sandbox = e2bSandboxRef.current;
+                        if (sandbox?.isReady) sandbox.writeFiles(restored);
                     }
                 }}
                 isOpen={isHistoryPanelOpen}
