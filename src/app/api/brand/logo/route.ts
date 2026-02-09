@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { genAI, MODELS } from "@/lib/gemini";
+import { db } from "@/lib/firebase";
+import { doc, updateDoc } from "firebase/firestore";
 
 // Logo style variations
 const LOGO_STYLES = [
@@ -95,7 +97,7 @@ Output: A single clean logo using the brand colors, centered on white background
 
 export async function POST(request: NextRequest) {
     try {
-        const { brandName, category, tagline, colorPalette, count = 4 } = await request.json();
+        const { brandName, category, tagline, colorPalette, count = 4, projectId } = await request.json();
 
         if (!brandName || typeof brandName !== "string") {
             return NextResponse.json(
@@ -133,6 +135,31 @@ export async function POST(request: NextRequest) {
         }
 
         console.log(`Successfully generated ${logos.length} logos`);
+
+        // Persist to Firestore subcollection (not main document) to avoid 1MB limit
+        if (projectId && db) {
+            try {
+                const { collection: fbCollection, addDoc, getDocs, deleteDoc } = await import("firebase/firestore");
+                const logosCollectionRef = fbCollection(db, "builder_projects", projectId, "logo_options");
+
+                // Clear existing logos first
+                const existingLogos = await getDocs(logosCollectionRef);
+                await Promise.all(existingLogos.docs.map(d => deleteDoc(d.ref)));
+
+                // Save each logo as a separate document
+                await Promise.all(logos.map(logo =>
+                    addDoc(logosCollectionRef, {
+                        style: logo.style,
+                        image: logo.image,
+                        createdAt: new Date(),
+                    })
+                ));
+                console.log(`Saved ${logos.length} logos to subcollection for project ${projectId}`);
+            } catch (dbError) {
+                console.error("Failed to save logos to database:", dbError);
+                // Don't fail the request if DB save fails
+            }
+        }
 
         return NextResponse.json({
             success: true,

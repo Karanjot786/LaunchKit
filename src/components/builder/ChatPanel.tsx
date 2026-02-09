@@ -5,6 +5,8 @@ import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { BrandSuggestions, QuickActions } from "./BrandSuggestions";
+import ReactMarkdown from "react-markdown";
 
 interface Message {
     id: string;
@@ -12,18 +14,25 @@ interface Message {
     content: string;
     files?: Record<string, string>;
     thinking?: number;
+    suggestions?: Array<{ label: string; action: string }>;
+    brandSuggestions?: {
+        type: "names" | "colors" | "logos";
+        data: unknown[];
+    };
 }
 
 interface ChatPanelProps {
     messages: Message[];
     onSend: (message: string) => void;
+    onBrandSelect?: (type: string, selection: unknown) => void;
     isLoading: boolean;
     thinkingTime: number;
     brandName: string;
 }
 
-export function ChatPanel({ messages, onSend, isLoading, thinkingTime, brandName }: ChatPanelProps) {
+export function ChatPanel({ messages, onSend, onBrandSelect, isLoading, thinkingTime, brandName }: ChatPanelProps) {
     const [input, setInput] = useState("");
+    const [selectedBrand, setSelectedBrand] = useState<Record<string, unknown>>({});
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -40,6 +49,22 @@ export function ChatPanel({ messages, onSend, isLoading, thinkingTime, brandName
         if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             handleSend();
+        }
+    };
+
+    const handleBrandSelect = (type: string, selection: unknown) => {
+        setSelectedBrand((prev) => ({ ...prev, [type]: selection }));
+        if (onBrandSelect) {
+            onBrandSelect(type, selection);
+        }
+        // Auto-confirm the selection
+        const confirmMessages: Record<string, string> = {
+            names: `I'll use "${(selection as { name: string }).name}" as my brand name`,
+            colors: `I like the "${(selection as { name: string }).name}" color palette`,
+            logos: "I'll use this logo",
+        };
+        if (confirmMessages[type]) {
+            onSend(confirmMessages[type]);
         }
     };
 
@@ -65,15 +90,53 @@ export function ChatPanel({ messages, onSend, isLoading, thinkingTime, brandName
                         key={msg.id}
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        className={msg.role === "user" ? "ml-8" : "mr-8"}
+                        className={msg.role === "user" ? "ml-8" : "mr-4"}
                     >
                         <div
                             className={`rounded-2xl p-4 ${msg.role === "user" ? "bg-zinc-800 ml-auto" : "bg-zinc-800/50"
                                 }`}
                         >
-                            <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                            {/* Render markdown for assistant messages */}
+                            <div className="text-sm prose prose-invert prose-sm max-w-none">
+                                <ReactMarkdown
+                                    components={{
+                                        p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                                        strong: ({ children }) => <strong className="text-cyan-400 font-semibold">{children}</strong>,
+                                        ul: ({ children }) => <ul className="list-disc list-inside mb-2">{children}</ul>,
+                                        li: ({ children }) => <li className="text-zinc-300">{children}</li>,
+                                    }}
+                                >
+                                    {msg.content}
+                                </ReactMarkdown>
+                            </div>
+
+                            {/* Brand suggestions */}
+                            {msg.brandSuggestions && (
+                                <BrandSuggestions
+                                    type={msg.brandSuggestions.type}
+                                    suggestions={msg.brandSuggestions.data as string[]}
+                                    onSelect={(sel) => handleBrandSelect(msg.brandSuggestions!.type, sel)}
+                                    selectedId={
+                                        selectedBrand[msg.brandSuggestions.type]
+                                            ? (selectedBrand[msg.brandSuggestions.type] as { name?: string; id?: number })?.name ||
+                                            (selectedBrand[msg.brandSuggestions.type] as { id?: number })?.id ||
+                                            (selectedBrand[msg.brandSuggestions.type] as string)
+                                            : undefined
+                                    }
+                                />
+                            )}
+
+                            {/* Quick action suggestions */}
+                            {msg.suggestions && msg.suggestions.length > 0 && (
+                                <QuickActions
+                                    actions={msg.suggestions}
+                                    onAction={(action) => onSend(action)}
+                                />
+                            )}
+
+                            {/* File badges */}
                             {msg.files && Object.keys(msg.files).length > 0 && (
-                                <div className="mt-2 flex flex-wrap gap-1">
+                                <div className="mt-3 flex flex-wrap gap-1">
                                     {Object.keys(msg.files).map((file) => (
                                         <Badge key={file} variant="secondary" className="text-xs bg-zinc-700">
                                             {file.split("/").pop()}
@@ -90,15 +153,15 @@ export function ChatPanel({ messages, onSend, isLoading, thinkingTime, brandName
                     <motion.div
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
-                        className="flex flex-col gap-2 text-sm text-zinc-400"
+                        className="flex flex-col gap-2 text-sm text-zinc-400 bg-zinc-800/30 rounded-2xl p-4"
                     >
                         <div className="flex items-center gap-2">
                             <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                            Thought for {thinkingTime}s
+                            Thinking for {thinkingTime}s
                         </div>
                         <div className="flex items-center gap-2">
                             <span>✨</span>
-                            Generating code...
+                            Generating...
                         </div>
                     </motion.div>
                 )}
@@ -126,9 +189,8 @@ export function ChatPanel({ messages, onSend, isLoading, thinkingTime, brandName
                         ↑
                     </Button>
                 </div>
-                <div className="flex items-center gap-2 mt-2 text-xs text-zinc-500">
-                    <button className="hover:text-white">+ Add context</button>
-                    <button className="hover:text-white">📎 Attach</button>
+                <div className="flex items-center gap-4 mt-2 text-xs text-zinc-500">
+                    <span>Press Enter to send • Shift+Enter for new line</span>
                 </div>
             </div>
         </div>

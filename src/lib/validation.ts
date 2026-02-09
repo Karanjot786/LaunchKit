@@ -48,6 +48,11 @@ export interface EnhancedValidationResult {
     recommendation: "proceed" | "pivot" | "reconsider";
     opportunities: string[];
     risks: string[];
+    proposedFeatures: {
+        title: string;
+        description: string;
+        priority: "high" | "medium" | "low";
+    }[];
 }
 
 /**
@@ -232,6 +237,11 @@ export async function generateFinalAnalysis(
     recommendation: "proceed" | "pivot" | "reconsider";
     opportunities: string[];
     risks: string[];
+    proposedFeatures: {
+        title: string;
+        description: string;
+        priority: "high" | "medium" | "low";
+    }[];
 }> {
     const prompt = `Based on comprehensive research, analyze this startup idea:
 
@@ -265,7 +275,10 @@ Return JSON:
   "verdict": "<2-3 sentence summary>",
   "recommendation": "proceed" | "pivot" | "reconsider",
   "opportunities": ["<opportunity1>", "<opportunity2>", "<opportunity3>"],
-  "risks": ["<risk1>", "<risk2>", "<risk3>"]
+  "risks": ["<risk1>", "<risk2>", "<risk3>"],
+  "proposedFeatures": [
+    { "title": "<feature name>", "description": "<what it does & why>", "priority": "high" }
+  ]
 }`;
 
     return generateJSON<{
@@ -274,6 +287,11 @@ Return JSON:
         recommendation: "proceed" | "pivot" | "reconsider";
         opportunities: string[];
         risks: string[];
+        proposedFeatures: {
+            title: string;
+            description: string;
+            priority: "high" | "medium" | "low";
+        }[];
     }>(prompt, "You are a startup advisor providing data-driven analysis.");
 }
 

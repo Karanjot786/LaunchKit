@@ -1,11 +1,19 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { PreviewTab } from "./PreviewTab";
 import { CodeTab } from "./CodeTab";
+import { BrandPanel } from "./BrandPanel";
+import { BrandSetupPreview } from "./BrandSetupPreview";
+import { StreamingStatus } from "./StreamingStatus";
+import { VersionHistoryPanel } from "./VersionHistoryPanel";
+import { ExportPanel } from "./ExportPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { initializeWebContainer, writeFiles } from "@/lib/webcontainer";
+import { useVersionHistory } from "@/lib/version-history";
+import { useStreamingBuilder } from "@/hooks/useStreamingBuilder";
 
 interface BrandContext {
     name: string;
@@ -19,9 +27,10 @@ interface BrandContext {
         text: string;
     };
     validation: {
-        category: { primary: string; targetAudience: string; keywords: string[] };
-        community: { painPoints: string[] };
-        opportunities: string[];
+        category?: { primary: string; targetAudience: string; keywords: string[] };
+        community?: { painPoints: string[] };
+        opportunities?: string[];
+        proposedFeatures?: { title: string; description: string; priority: string }[];
     };
     idea?: string;
 }
@@ -32,30 +41,332 @@ interface Message {
     content: string;
     files?: Record<string, string>;
     thinking?: number;
+    suggestions?: Array<{ label: string; action: string }>;
 }
 
 interface BuilderLayoutProps {
     brandContext: BrandContext;
     projectId?: string;
+    onProjectUpdate?: (updates: Record<string, unknown>) => Promise<void>;
+    initialFiles?: Record<string, string>;
 }
 
-export function BuilderLayout({ brandContext, projectId }: BuilderLayoutProps) {
-    const [messages, setMessages] = useState<Message[]>([
-        {
+// Generate smart first message based on project state
+function getInitialMessage(brand: BrandContext): Message {
+    const hasValidation = brand.validation && Object.keys(brand.validation).length > 0 && brand.validation.category;
+    const hasName = brand.name && brand.name !== "Untitled Project";
+    const hasColors = brand.colorPalette.primary !== "#6366F1";
+    const hasLogo = brand.logo !== null;
+
+    if (!hasValidation) {
+        return {
             id: "initial",
             role: "assistant",
-            content: `I'm ready to help you build the ${brandContext.name} landing page with E2B cloud sandbox!\n\nI know:\n• Target: ${brandContext.validation.category.targetAudience}\n• Pain points: ${brandContext.validation.community.painPoints.slice(0, 2).join(", ")}\n\nSay "build my landing page" to get started!`,
-        },
-    ]);
-    const [files, setFiles] = useState<Record<string, string>>({});
+            content: `🔍 **Analyzing your idea...**\n\nI'm validating your startup concept. This will take a moment.\n\nOnce complete, I'll suggest brand names that resonate with your target audience.`,
+        };
+    }
+
+    if (!hasName) {
+        const category = brand.validation.category?.primary || "your niche";
+        const audience = brand.validation.category?.targetAudience || "your target users";
+        return {
+            id: "initial",
+            role: "assistant",
+            content: `✅ **Validation Complete!**\n\nYour idea is in the **${category}** space, targeting **${audience}**.\n\nLet's create your brand! Say **"suggest names"** or describe the vibe you want.`,
+            suggestions: [
+                { label: "Suggest names", action: "suggest names for my brand" },
+                { label: "Modern & minimal", action: "suggest modern minimal brand names" },
+                { label: "Fun & playful", action: "suggest fun playful brand names" },
+            ],
+        };
+    }
+
+    if (!hasColors) {
+        return {
+            id: "initial",
+            role: "assistant",
+            content: `🎨 Great choice! **${brand.name}** is a strong name.\n\nNow let's pick colors that match your brand personality. Say **"suggest colors"** or tell me your preferences.`,
+            suggestions: [
+                { label: "Suggest colors", action: "suggest color palettes for my brand" },
+                { label: "Professional", action: "suggest professional corporate colors" },
+                { label: "Vibrant", action: "suggest vibrant energetic colors" },
+            ],
+        };
+    }
+
+    if (!hasLogo) {
+        return {
+            id: "initial",
+            role: "assistant",
+            content: `🖼️ Perfect color palette!\n\nLet's create your logo. Say **"generate logo"** and I'll design options that match your brand.`,
+            suggestions: [
+                { label: "Generate logo", action: "generate logo options for my brand" },
+                { label: "Skip for now", action: "skip logo and build my landing page" },
+            ],
+        };
+    }
+
+    // All brand elements complete
+    const painPoints = brand.validation.community?.painPoints?.slice(0, 2).join(", ") || "your users' needs";
+    return {
+        id: "initial",
+        role: "assistant",
+        content: `🚀 **${brand.name}** is ready to build!\n\nI know:\n• Target: ${brand.validation.category?.targetAudience || "your audience"}\n• Pain points: ${painPoints}\n\nSay **"build my landing page"** to get started!`,
+        suggestions: [
+            { label: "Build landing page", action: "build my landing page" },
+            { label: "Build full app", action: "build a full featured app" },
+        ],
+    };
+}
+
+export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initialFiles = {} }: BuilderLayoutProps) {
+    const [messages, setMessages] = useState<Message[]>([getInitialMessage(brandContext)]);
+    const [files, setFiles] = useState<Record<string, string>>(initialFiles);
     const [activeTab, setActiveTab] = useState<"preview" | "code">("preview");
-    const [activeFile, setActiveFile] = useState("app/page.tsx");
+    const [activeFile, setActiveFile] = useState("src/App.jsx");
     const [isLoading, setIsLoading] = useState(false);
     const [thinkingTime, setThinkingTime] = useState(0);
 
-    // E2B sandbox state
-    const [sandboxId, setSandboxId] = useState<string | null>(null);
-    const [sandboxUrl, setSandboxUrl] = useState<string | null>(null);
+    // Brand Panel state
+    const [brandPanelCollapsed, setBrandPanelCollapsed] = useState(false);
+    const [currentBrand, setCurrentBrand] = useState(brandContext);
+
+    // Brand suggestions state (for preview area)
+    const [brandSuggestions, setBrandSuggestions] = useState<{
+        type: "names" | "colors" | "logos" | null;
+        data: unknown[];
+    }>({ type: null, data: [] });
+
+    // WebContainer state
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [containerStatus, setContainerStatus] = useState<string>("Initializing...");
+    const [isContainerReady, setIsContainerReady] = useState(false);
+    const containerInitialized = useRef(false);
+    const [saveStatus, setSaveStatus] = useState<"saved" | "saving" | "unsaved">("saved");
+    const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+    // Streaming state
+    const streaming = useStreamingBuilder(initialFiles);
+    const lastUpdateCountRef = useRef(0);
+
+    // Sync streaming files to local state and WebContainer
+    useEffect(() => {
+        if (streaming.fileUpdates.length > lastUpdateCountRef.current) {
+            const newUpdates = streaming.fileUpdates.slice(lastUpdateCountRef.current);
+            lastUpdateCountRef.current = streaming.fileUpdates.length;
+
+            const updatesToApply: Record<string, string> = {};
+            newUpdates.forEach((u) => {
+                if (streaming.files[u.path] !== undefined) {
+                    updatesToApply[u.path] = streaming.files[u.path];
+                }
+            });
+
+            if (Object.keys(updatesToApply).length > 0) {
+                setFiles((prev) => ({ ...prev, ...updatesToApply }));
+
+                // Write to WebContainer immediately
+                if (isContainerReady) {
+                    writeFiles(updatesToApply).catch(console.error);
+                }
+
+                // Debounce full project save is handled by the other useEffect
+            }
+        }
+    }, [streaming.fileUpdates, streaming.files, isContainerReady]);
+
+    // Version history with Firebase persistence
+    const { snapshots, canUndo, canRedo, isLoading: historyLoading, createSnapshot, clearHistory, undoChanges, redoChanges, restoreSnapshot } = useVersionHistory(files, { projectId });
+
+    // Panel state
+    const [isHistoryPanelOpen, setIsHistoryPanelOpen] = useState(false);
+    const [isExportPanelOpen, setIsExportPanelOpen] = useState(false);
+
+    // Auto-save to Firestore when files change
+    useEffect(() => {
+        if (!onProjectUpdate || Object.keys(files).length === 0) return;
+
+        setSaveStatus("unsaved");
+
+        // Debounce save
+        if (saveTimeoutRef.current) {
+            clearTimeout(saveTimeoutRef.current);
+        }
+
+        saveTimeoutRef.current = setTimeout(async () => {
+            setSaveStatus("saving");
+            try {
+                await onProjectUpdate({ files, updatedAt: new Date() });
+                setSaveStatus("saved");
+            } catch (error) {
+                console.error("Auto-save failed:", error);
+                setSaveStatus("unsaved");
+            }
+        }, 2000);
+
+        return () => {
+            if (saveTimeoutRef.current) {
+                clearTimeout(saveTimeoutRef.current);
+            }
+        };
+    }, [files, onProjectUpdate]);
+
+    // Initialize WebContainer on mount
+    useEffect(() => {
+        if (containerInitialized.current) return;
+        containerInitialized.current = true;
+
+        const init = async () => {
+            try {
+                const { checkCrossOriginIsolation } = await import("@/lib/webcontainer");
+                const isolation = checkCrossOriginIsolation();
+
+                if (!isolation.isolated) {
+                    setContainerStatus("Headers not configured - using fallback");
+                    return;
+                }
+
+                await initializeWebContainer(
+                    (url) => {
+                        setPreviewUrl(url);
+                        setContainerStatus("Ready");
+                        setIsContainerReady(true);
+                    },
+                    (status) => {
+                        setContainerStatus(status);
+                    }
+                );
+            } catch (error) {
+                console.error("WebContainer init error:", error);
+                setContainerStatus(`Error: ${error instanceof Error ? error.message : "Unknown"}`);
+            }
+        };
+
+        init();
+    }, []);
+
+    // Write initial files to WebContainer when it becomes ready
+    const initialFilesWritten = useRef(false);
+    useEffect(() => {
+        if (isContainerReady && Object.keys(initialFiles).length > 0 && !initialFilesWritten.current) {
+            initialFilesWritten.current = true;
+            writeFiles(initialFiles).catch(console.error);
+        }
+    }, [isContainerReady, initialFiles]);
+
+    // Auto-trigger validation if no validation data exists
+    const validationTriggered = useRef(false);
+    useEffect(() => {
+        if (validationTriggered.current) return;
+
+        const hasValidation = currentBrand.validation &&
+            Object.keys(currentBrand.validation).length > 0 &&
+            currentBrand.validation.category;
+
+        const hasIdea = currentBrand.idea && currentBrand.idea.trim().length > 10;
+
+        if (!hasValidation && hasIdea) {
+            validationTriggered.current = true;
+
+            // Trigger validation
+            (async () => {
+                setIsLoading(true);
+                const startTime = Date.now();
+
+                try {
+                    const res = await fetch("/api/validate", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ idea: currentBrand.idea }),
+                    });
+                    const data = await res.json();
+
+                    if (data.success) {
+                        // Update brand with validation
+                        const validationData = data.data;
+                        setCurrentBrand(prev => ({
+                            ...prev,
+                            validation: validationData
+                        }));
+
+                        // Save to Firestore
+                        if (onProjectUpdate) {
+                            onProjectUpdate({ validation: validationData });
+                        }
+
+                        // Add success message with name suggestions prompt
+                        const category = validationData.category?.primary || "your niche";
+                        const audience = validationData.category?.targetAudience || "your target users";
+
+                        setMessages(prev => [...prev, {
+                            id: Date.now().toString(),
+                            role: "assistant" as const,
+                            content: `✅ **Validation Complete!**\n\nYour idea is in the **${category}** space, targeting **${audience}**.\n\nLet's create your brand! Say **"suggest names"** or describe the vibe you want.`,
+                            thinking: Math.round((Date.now() - startTime) / 1000),
+                            suggestions: [
+                                { label: "Suggest names", action: "suggest names for my brand" },
+                                { label: "Modern & minimal", action: "suggest modern minimal brand names" },
+                                { label: "Fun & playful", action: "suggest fun playful brand names" },
+                            ],
+                        }]);
+                    } else {
+                        throw new Error(data.error || "Validation failed");
+                    }
+                } catch (error) {
+                    console.error("Auto-validation error:", error);
+                    setMessages(prev => [...prev, {
+                        id: Date.now().toString(),
+                        role: "assistant" as const,
+                        content: `I couldn't validate your idea automatically. Please type **"validate my idea"** to try again.`,
+                    }]);
+                } finally {
+                    setIsLoading(false);
+                }
+            })();
+        } else if (!hasValidation && !hasIdea) {
+            // No idea saved - prompt user to describe it
+            setMessages([{
+                id: "no-idea",
+                role: "assistant",
+                content: `👋 **Welcome to the Builder!**\n\nI notice you haven't described your idea yet. Tell me about your startup and I'll help validate it and create your brand.\n\nFor example: *"A fitness app that uses AI to create personalized workout plans"*`,
+            }]);
+        }
+    }, [currentBrand.validation, currentBrand.idea, onProjectUpdate]);
+
+    // Handle brand step trigger from panel
+    const handleTriggerBrandStep = useCallback((step: "name" | "colors" | "logo") => {
+        const prompts: Record<string, string> = {
+            name: "suggest new brand names for my project",
+            colors: "suggest different color palettes for my brand",
+            logo: "generate new logo options for my brand",
+        };
+
+        // Simulate user sending the request
+        handleSendMessage(prompts[step]);
+    }, []);
+
+    // Handle brand selection from chat suggestions
+    const handleBrandSelect = useCallback((type: string, selection: unknown) => {
+        let updates: Partial<BrandContext> = {};
+
+        if (type === "names") {
+            const sel = selection as { name: string; tagline: string };
+            updates = { name: sel.name, tagline: sel.tagline };
+        } else if (type === "colors") {
+            const sel = selection as { colors: BrandContext["colorPalette"] };
+            updates = { colorPalette: sel.colors };
+        } else if (type === "logos") {
+            updates = { logo: selection as string };
+        }
+
+        // Update local state
+        setCurrentBrand((prev) => ({ ...prev, ...updates }));
+
+        // Persist to Firestore
+        if (onProjectUpdate) {
+            onProjectUpdate(updates);
+        }
+    }, [onProjectUpdate]);
 
     const handleSendMessage = useCallback(async (content: string) => {
         const userMessage: Message = {
@@ -73,45 +384,131 @@ export function BuilderLayout({ brandContext, projectId }: BuilderLayoutProps) {
             setThinkingTime(Math.round((Date.now() - startTime) / 1000));
         }, 1000);
 
+        const lowerContent = content.toLowerCase();
+
         try {
-            const response = await fetch("/api/builder/chat", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    message: content,
-                    brandContext,
-                    currentFiles: files,
-                    sandboxId, // Pass existing sandbox ID if available
-                }),
-            });
+            // Detect brand-related requests and route to dedicated APIs
+            const isNameRequest = lowerContent.includes("name") && (lowerContent.includes("suggest") || lowerContent.includes("generate"));
+            const isColorRequest = lowerContent.includes("color") && (lowerContent.includes("suggest") || lowerContent.includes("generate") || lowerContent.includes("palette"));
+            const isLogoRequest = lowerContent.includes("logo") && (lowerContent.includes("generate") || lowerContent.includes("create"));
 
-            const data = await response.json();
+            if (isNameRequest) {
+                // Call names API
+                const res = await fetch("/api/brand/names", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        idea: currentBrand.idea || currentBrand.name,
+                        keywords: currentBrand.validation?.category?.keywords || [],
+                        validation: {
+                            category: currentBrand.validation?.category?.primary,
+                            targetAudience: currentBrand.validation?.category?.targetAudience,
+                            keywords: currentBrand.validation?.category?.keywords,
+                            painPoints: currentBrand.validation?.community?.painPoints,
+                            opportunities: currentBrand.validation?.opportunities,
+                        },
+                    }),
+                });
+                const data = await res.json();
 
-            if (data.success) {
-                // Update sandbox state
-                if (data.sandboxId && !sandboxId) {
-                    setSandboxId(data.sandboxId);
+                if (data.success) {
+                    setBrandSuggestions({ type: "names", data: data.data });
+                    setMessages((prev) => [...prev, {
+                        id: Date.now().toString(),
+                        role: "assistant" as const,
+                        content: `🎯 Here are **${data.data.length} name suggestions** based on your target audience and market positioning!\n\nSelect a name from the preview panel on the right, or tell me if you want a different style.`,
+                        thinking: Math.round((Date.now() - startTime) / 1000),
+                        suggestions: [
+                            { label: "More techy names", action: "suggest more technical brand names" },
+                            { label: "More playful names", action: "suggest fun playful brand names" },
+                        ],
+                    }]);
+                } else {
+                    throw new Error(data.error || "Failed to generate names");
                 }
-                if (data.previewUrl) {
-                    setSandboxUrl(data.previewUrl);
-                }
+            } else if (isColorRequest) {
+                // Call colors API (works even without brand name - uses category/idea as context)
+                const brandNameOrFallback = currentBrand.name !== "Untitled Project"
+                    ? currentBrand.name
+                    : currentBrand.validation?.category?.primary || "Your Brand";
 
-                // Update files
-                if (data.files) {
-                    setFiles((prev) => ({ ...prev, ...data.files }));
+                const res = await fetch("/api/brand/colors", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        brandName: brandNameOrFallback,
+                        category: currentBrand.validation?.category?.primary,
+                        targetAudience: currentBrand.validation?.category?.targetAudience,
+                        tagline: currentBrand.tagline,
+                    }),
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    setBrandSuggestions({ type: "colors", data: data.data.palettes });
+                    setMessages((prev) => [...prev, {
+                        id: Date.now().toString(),
+                        role: "assistant" as const,
+                        content: `🎨 Here are **${data.data.palettes.length} color palettes** designed for your brand!\n\nEach palette has a unique mood. Select one from the preview panel.`,
+                        thinking: Math.round((Date.now() - startTime) / 1000),
+                    }]);
+                } else {
+                    throw new Error(data.error || "Failed to generate colors");
+                }
+            } else if (isLogoRequest) {
+                // Call logo API
+                const brandNameForLogo = currentBrand.name !== "Untitled Project"
+                    ? currentBrand.name
+                    : currentBrand.validation?.category?.primary || "Brand";
+
+                const res = await fetch("/api/brand/logo", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        brandName: brandNameForLogo,
+                        tagline: currentBrand.tagline,
+                        colors: currentBrand.colorPalette,
+                        category: currentBrand.validation?.category?.primary,
+                        projectId,
+                    }),
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    setBrandSuggestions({ type: "logos", data: data.data.logos || [data.data.url] });
+                    setMessages((prev) => [...prev, {
+                        id: Date.now().toString(),
+                        role: "assistant" as const,
+                        content: `🖼️ I've generated logo options for your brand!\n\nSelect your favorite from the preview panel.`,
+                        thinking: Math.round((Date.now() - startTime) / 1000),
+                    }]);
+                } else {
+                    throw new Error(data.error || "Failed to generate logo");
+                }
+            } else {
+                // Default: Use streaming builder for code generation
+                // Clear version history for fresh generation (prevents file accumulation)
+                await clearHistory();
+                await streaming.generate(content, currentBrand, { mode: "fast" });
+
+                // After streaming completes
+                const finalFiles = streaming.files;
+
+                // Ensure everything is synced
+                setFiles(finalFiles);
+                if (onProjectUpdate) {
+                    onProjectUpdate({ files: finalFiles, updatedAt: new Date() });
                 }
 
                 const assistantMessage: Message = {
                     id: (Date.now() + 1).toString(),
                     role: "assistant",
-                    content: data.message,
-                    files: data.files,
+                    content: streaming.message || "Code generation complete!",
+                    files: finalFiles,
                     thinking: Math.round((Date.now() - startTime) / 1000),
                 };
 
                 setMessages((prev) => [...prev, assistantMessage]);
-            } else {
-                throw new Error(data.error || "Generation failed");
             }
         } catch (error) {
             console.error("Builder chat error:", error);
@@ -125,10 +522,15 @@ export function BuilderLayout({ brandContext, projectId }: BuilderLayoutProps) {
             clearInterval(timer);
             setIsLoading(false);
         }
-    }, [brandContext, files, sandboxId]);
+    }, [currentBrand, files, isContainerReady, onProjectUpdate, streaming]);
 
-    const handleFileChange = (file: string, content: string) => {
+    const handleFileChange = async (file: string, content: string) => {
         setFiles((prev) => ({ ...prev, [file]: content }));
+        streaming.updateFile(file, content);
+
+        if (isContainerReady) {
+            await writeFiles({ [file]: content });
+        }
     };
 
     return (
@@ -136,49 +538,128 @@ export function BuilderLayout({ brandContext, projectId }: BuilderLayoutProps) {
             {/* Header */}
             <header className="h-14 border-b border-zinc-800 flex items-center justify-between px-4">
                 <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                        <div
-                            className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold"
-                            style={{ backgroundColor: brandContext.colorPalette.primary }}
+                    {projectId && (
+                        <a
+                            href="/dashboard"
+                            className="text-zinc-500 hover:text-white transition-colors"
+                            title="Back to Dashboard"
                         >
-                            {brandContext.name.charAt(0)}
-                        </div>
-                        <span className="text-white font-medium">{brandContext.name}</span>
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                            </svg>
+                        </a>
+                    )}
+                    <div className="flex items-center gap-2">
+                        {currentBrand.logo ? (
+                            <img src={currentBrand.logo} alt="" className="w-8 h-8 rounded-lg" />
+                        ) : (
+                            <div
+                                className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold"
+                                style={{ backgroundColor: currentBrand.colorPalette.primary }}
+                            >
+                                {currentBrand.name.charAt(0)}
+                            </div>
+                        )}
+                        <span className="text-white font-medium">{currentBrand.name}</span>
                     </div>
+                    {projectId && (
+                        <span className={`text-xs px-2 py-1 rounded ${saveStatus === "saved" ? "text-green-400" :
+                            saveStatus === "saving" ? "text-yellow-400" : "text-orange-400"
+                            }`}>
+                            {saveStatus === "saved" ? "✓ Saved" :
+                                saveStatus === "saving" ? "Saving..." : "Unsaved"}
+                        </span>
+                    )}
                     <Badge variant="secondary" className="bg-zinc-800 text-zinc-400">
-                        {sandboxId ? "🟢 E2B Connected" : "⚪ Ready"}
+                        {isContainerReady ? "🟢 Ready" : `⏳ ${containerStatus}`}
                     </Badge>
                 </div>
                 <div className="flex items-center gap-2">
-                    {sandboxUrl && (
-                        <a
-                            href={sandboxUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-zinc-400 hover:text-white text-sm"
+                    {/* Undo/Redo buttons */}
+                    <div className="flex items-center border-r border-zinc-700 pr-2 mr-2">
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className={`text-zinc-400 hover:text-white ${!canUndo ? "opacity-50 cursor-not-allowed" : ""}`}
+                            onClick={() => {
+                                const restored = undoChanges();
+                                if (restored) {
+                                    setFiles(restored);
+                                    if (isContainerReady) writeFiles(restored);
+                                }
+                            }}
+                            disabled={!canUndo}
+                            title="Undo (⌘Z)"
                         >
-                            Open Preview ↗
-                        </a>
-                    )}
-                    <Button variant="ghost" size="sm" className="text-zinc-400 hover:text-white">
-                        Share
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+                            </svg>
+                        </Button>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className={`text-zinc-400 hover:text-white ${!canRedo ? "opacity-50 cursor-not-allowed" : ""}`}
+                            onClick={() => {
+                                const restored = redoChanges();
+                                if (restored) {
+                                    setFiles(restored);
+                                    if (isContainerReady) writeFiles(restored);
+                                }
+                            }}
+                            disabled={!canRedo}
+                            title="Redo (⌘⇧Z)"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10h-10a8 8 0 00-8 8v2m18-10l-6 6m6-6l-6-6" />
+                            </svg>
+                        </Button>
+                    </div>
+
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-zinc-400 hover:text-white"
+                        onClick={() => setIsHistoryPanelOpen(true)}
+                        title="Version History"
+                    >
+                        <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        History
                     </Button>
-                    <Button size="sm" className="bg-white text-black hover:bg-zinc-200">
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-zinc-400 hover:text-white"
+                        onClick={() => setIsExportPanelOpen(true)}
+                    >
+                        Export
+                    </Button>
+                    <Button size="sm" className="bg-white text-black hover:bg-zinc-200" onClick={() => setIsExportPanelOpen(true)}>
                         Publish
                     </Button>
                 </div>
             </header>
 
-            {/* Main content */}
+            {/* Main content with Brand Panel */}
             <div className="flex flex-1 overflow-hidden">
-                {/* Chat Panel - Left */}
+                {/* Brand Panel - Left */}
+                <BrandPanel
+                    project={currentBrand}
+                    onTriggerStep={handleTriggerBrandStep}
+                    collapsed={brandPanelCollapsed}
+                    onToggleCollapse={() => setBrandPanelCollapsed(!brandPanelCollapsed)}
+                />
+
+                {/* Chat Panel */}
                 <div className="w-[380px] border-r border-zinc-800">
                     <ChatPanel
                         messages={messages}
                         onSend={handleSendMessage}
+                        onBrandSelect={handleBrandSelect}
                         isLoading={isLoading}
                         thinkingTime={thinkingTime}
-                        brandName={brandContext.name}
+                        brandName={currentBrand.name}
                     />
                 </div>
 
@@ -189,8 +670,8 @@ export function BuilderLayout({ brandContext, projectId }: BuilderLayoutProps) {
                         <button
                             onClick={() => setActiveTab("preview")}
                             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${activeTab === "preview"
-                                    ? "bg-zinc-800 text-white"
-                                    : "text-zinc-400 hover:text-white"
+                                ? "bg-zinc-800 text-white"
+                                : "text-zinc-400 hover:text-white"
                                 }`}
                         >
                             ● Preview
@@ -198,25 +679,73 @@ export function BuilderLayout({ brandContext, projectId }: BuilderLayoutProps) {
                         <button
                             onClick={() => setActiveTab("code")}
                             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${activeTab === "code"
-                                    ? "bg-zinc-800 text-white"
-                                    : "text-zinc-400 hover:text-white"
+                                ? "bg-zinc-800 text-white"
+                                : "text-zinc-400 hover:text-white"
                                 }`}
                         >
                             {"</>"} Code
                         </button>
-                        {sandboxId && (
-                            <span className="ml-auto text-xs text-zinc-500">
-                                Sandbox: {sandboxId.slice(0, 8)}...
-                            </span>
-                        )}
+                        <span className="ml-auto text-xs text-zinc-500">
+                            {containerStatus}
+                        </span>
                     </div>
 
                     {/* Content */}
                     {activeTab === "preview" ? (
-                        <PreviewTab
-                            sandboxUrl={sandboxUrl}
-                            isLoading={isLoading && !sandboxUrl}
-                        />
+                        // Show brand setup preview when no code exists OR when showing brand suggestions
+                        Object.keys(files).length === 0 || brandSuggestions.type ? (
+                            <BrandSetupPreview
+                                brand={currentBrand}
+                                isValidating={isLoading && !brandSuggestions.type}
+                                suggestions={brandSuggestions}
+                                onSelectName={(name) => {
+                                    handleBrandSelect("names", name);
+                                    setBrandSuggestions({ type: null, data: [] });
+                                    setMessages((prev) => [...prev, {
+                                        id: Date.now().toString(),
+                                        role: "assistant" as const,
+                                        content: `✅ Great choice! **${name.name}** is now your brand name.\n\n*"${name.tagline}"*\n\nNow let's pick your colors! Say **"suggest colors"** or describe the vibe you want.`,
+                                        suggestions: [
+                                            { label: "Suggest colors", action: "suggest color palettes for my brand" },
+                                            { label: "Bold & vibrant", action: "suggest bold vibrant color palettes" },
+                                            { label: "Minimal & clean", action: "suggest minimal clean color palettes" },
+                                        ],
+                                    }]);
+                                }}
+                                onSelectColors={(palette) => {
+                                    handleBrandSelect("colors", palette);
+                                    setBrandSuggestions({ type: null, data: [] });
+                                    setMessages((prev) => [...prev, {
+                                        id: Date.now().toString(),
+                                        role: "assistant" as const,
+                                        content: `🎨 **${palette.name}** palette applied!\n\n*${palette.mood}*\n\nYour brand is taking shape! Want to generate a logo? Say **"generate logo"**.`,
+                                        suggestions: [
+                                            { label: "Generate logo", action: "generate a logo for my brand" },
+                                            { label: "Build landing page", action: "create a landing page for my startup" },
+                                        ],
+                                    }]);
+                                }}
+                                onSelectLogo={(logoUrl) => {
+                                    handleBrandSelect("logos", logoUrl);
+                                    setBrandSuggestions({ type: null, data: [] });
+                                    setMessages((prev) => [...prev, {
+                                        id: Date.now().toString(),
+                                        role: "assistant" as const,
+                                        content: `🎉 **Perfect!** Your brand identity is complete!\n\nReady to build your landing page? Just say "create my landing page" and I'll generate it with your brand.`,
+                                        suggestions: [
+                                            { label: "Build landing page", action: "create a landing page for my startup" },
+                                            { label: "Generate social ads", action: "create social media ad designs" },
+                                        ],
+                                    }]);
+                                }}
+                            />
+                        ) : (
+                            <PreviewTab
+                                sandboxUrl={previewUrl}
+                                isLoading={!isContainerReady}
+                                statusMessage={containerStatus}
+                            />
+                        )
                     ) : (
                         <CodeTab
                             files={files}
@@ -225,8 +754,57 @@ export function BuilderLayout({ brandContext, projectId }: BuilderLayoutProps) {
                             onFileChange={handleFileChange}
                         />
                     )}
+
+                    {/* Streaming Status Overlay */}
+                    <StreamingStatus
+                        isStreaming={streaming.isStreaming}
+                        status={streaming.status}
+                        fileUpdates={streaming.fileUpdates}
+                        toolCalls={streaming.toolCalls}
+                    />
                 </div>
             </div>
+
+            {/* Version History Panel */}
+            <VersionHistoryPanel
+                snapshots={snapshots}
+                canUndo={canUndo}
+                canRedo={canRedo}
+                onUndo={() => {
+                    const restored = undoChanges();
+                    if (restored) {
+                        setFiles(restored);
+                        streaming.setFiles(restored);
+                        if (isContainerReady) writeFiles(restored);
+                    }
+                }}
+                onRedo={() => {
+                    const restored = redoChanges();
+                    if (restored) {
+                        setFiles(restored);
+                        streaming.setFiles(restored);
+                        if (isContainerReady) writeFiles(restored);
+                    }
+                }}
+                onRestore={(index) => {
+                    const restored = restoreSnapshot(index);
+                    if (restored) {
+                        setFiles(restored);
+                        streaming.setFiles(restored);
+                        if (isContainerReady) writeFiles(restored);
+                    }
+                }}
+                isOpen={isHistoryPanelOpen}
+                onClose={() => setIsHistoryPanelOpen(false)}
+            />
+
+            {/* Export Panel */}
+            <ExportPanel
+                files={files}
+                projectName={currentBrand.name}
+                isOpen={isExportPanelOpen}
+                onClose={() => setIsExportPanelOpen(false)}
+            />
         </div>
     );
 }

@@ -5,9 +5,10 @@ import { useState } from "react";
 interface PreviewTabProps {
     sandboxUrl: string | null;
     isLoading: boolean;
+    statusMessage?: string;
 }
 
-export function PreviewTab({ sandboxUrl, isLoading }: PreviewTabProps) {
+export function PreviewTab({ sandboxUrl, isLoading, statusMessage }: PreviewTabProps) {
     const [key, setKey] = useState(0);
 
     const handleRefresh = () => setKey(prev => prev + 1);
@@ -17,8 +18,8 @@ export function PreviewTab({ sandboxUrl, isLoading }: PreviewTabProps) {
             <div className="flex-1 bg-zinc-900 flex items-center justify-center">
                 <div className="text-center">
                     <div className="w-12 h-12 border-4 border-zinc-700 border-t-cyan-400 rounded-full animate-spin mx-auto mb-4" />
-                    <p className="text-zinc-400">Creating sandbox environment...</p>
-                    <p className="text-zinc-500 text-sm mt-2">This may take a few seconds</p>
+                    <p className="text-zinc-400">{statusMessage || "Initializing WebContainer..."}</p>
+                    <p className="text-zinc-500 text-sm mt-2">First load may take 30-60 seconds</p>
                 </div>
             </div>
         );
@@ -60,13 +61,13 @@ export function PreviewTab({ sandboxUrl, isLoading }: PreviewTabProps) {
                 </a>
             </div>
 
-            {/* Preview iframe */}
+            {/* Preview iframe - no sandbox needed, WebContainer handles isolation */}
             <iframe
                 key={key}
                 src={sandboxUrl}
                 className="w-full h-full border-0"
                 title="Preview"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                allow="cross-origin-isolated"
             />
         </div>
     );
