@@ -204,9 +204,10 @@ export function useVersionHistory(
         maxSnapshots?: number;
         autoSnapshotInterval?: number; // ms
         debounceDelay?: number; // ms
+        isStreaming?: boolean; // Suppress auto-snapshots during streaming
     } = {}
 ) {
-    const { projectId, maxSnapshots = 50, debounceDelay = 2000 } = options;
+    const { projectId, maxSnapshots = 50, debounceDelay = 2000, isStreaming = false } = options;
 
     const [history, setHistory] = useState<VersionHistoryState>(() =>
         createVersionHistory(maxSnapshots)
@@ -260,7 +261,8 @@ export function useVersionHistory(
     const lastSnapshotHashRef = useRef<string>("");
 
     useEffect(() => {
-        if (Object.keys(files).length === 0) return;
+        // Skip auto-snapshots during streaming to prevent capturing intermediate states
+        if (Object.keys(files).length === 0 || isStreaming) return;
 
         // Create a simple hash of file contents to detect actual changes
         const contentHash = Object.entries(files)
@@ -309,7 +311,7 @@ export function useVersionHistory(
                 clearTimeout(debounceRef.current);
             }
         };
-    }, [files, debounceDelay, projectId]); // Removed 'history' from deps to prevent infinite loop
+    }, [files, debounceDelay, projectId, isStreaming]); // Added isStreaming to deps
 
     // Manual snapshot with Firebase sync
     const createSnapshot = useCallback(

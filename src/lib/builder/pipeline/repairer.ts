@@ -72,6 +72,17 @@ export function validateSemanticOutput(
         issues.push("src/App.tsx should include a <main> landmark for semantic structure.");
     }
 
+    // Visual quality checks
+    const hasLucideImport = Object.values(files).some((f) => f.includes("lucide-react"));
+    if (!hasLucideImport) {
+        issues.push("No lucide-react icon imports found. Feature cards MUST use lucide-react icons, not empty placeholder circles.");
+    }
+
+    const hasStatsSection = content.includes("stats") || content.includes("social-proof") || content.includes("metric");
+    if (!hasStatsSection) {
+        issues.push("Missing stats/social-proof section. Add a section with 3-4 impressive metrics (e.g., users, uptime, countries).");
+    }
+
     return {
         isValid: issues.length === 0,
         issues,

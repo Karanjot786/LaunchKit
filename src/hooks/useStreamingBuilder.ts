@@ -5,7 +5,7 @@
  * Provides real-time updates for file changes, status, and messages.
  */
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 
 // =============================================================================
 // TYPES
@@ -76,6 +76,16 @@ interface BrandContext {
 // HOOK
 // =============================================================================
 
+// Valid code file paths must contain a dot (extension) and not be leaked result object keys
+const INVALID_FILE_NAMES = new Set(['base_content', 'message', 'complete', 'status', 'done', 'error']);
+
+function isValidCodeFilePath(path: string): boolean {
+    const basename = path.split('/').pop() || path;
+    if (INVALID_FILE_NAMES.has(basename)) return false;
+    if (!basename.includes('.')) return false;
+    return true;
+}
+
 export function useStreamingBuilder(initialFiles: Record<string, string> = {}) {
     const [state, setState] = useState<StreamState>({
         isStreaming: false,
@@ -87,6 +97,12 @@ export function useStreamingBuilder(initialFiles: Record<string, string> = {}) {
         error: null,
         turns: 0,
     });
+
+    // Use a ref to always have access to the latest files (avoids stale closures)
+    const filesRef = useRef<Record<string, string>>(state.files);
+    useEffect(() => {
+        filesRef.current = state.files;
+    }, [state.files]);
 
     const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -112,6 +128,8 @@ export function useStreamingBuilder(initialFiles: Record<string, string> = {}) {
             const controller = new AbortController();
             abortControllerRef.current = controller;
 
+            // Clear files BEFORE generation — fresh start each time
+            filesRef.current = {};
             setState((prev) => ({
                 ...prev,
                 isStreaming: true,
@@ -131,7 +149,7 @@ export function useStreamingBuilder(initialFiles: Record<string, string> = {}) {
                     body: JSON.stringify({
                         message,
                         brandContext,
-                        currentFiles: state.files,
+                        currentFiles: {}, // Always send empty for fresh generation — no old files!
                         mode: options.mode || "fast",
                         strategy: options.strategy,
                         quality: options.quality,
@@ -191,7 +209,7 @@ export function useStreamingBuilder(initialFiles: Record<string, string> = {}) {
                 abortControllerRef.current = null;
             }
         },
-        [state.files]
+        [] // No dependency on state.files — we use filesRef instead
     );
 
     /**
@@ -272,6 +290,11 @@ function handleEvent(
 
         case "file_created": {
             const data = event.data as FileData;
+            // Filter out non-code file paths that leak from result objects
+            if (!isValidCodeFilePath(data.path)) {
+                console.warn(`[useStreamingBuilder] Skipping invalid file path: ${data.path}`);
+                break;
+            }
             setState((prev) => ({
                 ...prev,
                 files: { ...prev.files, [data.path]: data.content || "" },
@@ -285,6 +308,11 @@ function handleEvent(
 
         case "file_edited": {
             const data = event.data as FileData;
+            // Filter out non-code file paths
+            if (!isValidCodeFilePath(data.path)) {
+                console.warn(`[useStreamingBuilder] Skipping invalid file path: ${data.path}`);
+                break;
+            }
             if (data.content) {
                 setState((prev) => ({
                     ...prev,

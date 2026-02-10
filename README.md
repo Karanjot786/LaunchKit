@@ -1,84 +1,174 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ✦ LaunchKit
+
+**From Startup Idea to Live App in Minutes**
+
+LaunchKit takes a startup idea in plain text and produces a live, deployed web application. One AI pipeline handles market validation, branding, code generation, and deployment. Powered entirely by Gemini 3.
+
+[![Live Demo](https://img.shields.io/badge/Live-Demo-blue?style=for-the-badge)](https://launchkit.karanjot.co.in)
+[![Gemini 3](https://img.shields.io/badge/Powered%20by-Gemini%203-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://deepmind.google/technologies/gemini/)
+
+---
+
+## How It Works
+
+1. **Describe your idea** in plain text
+2. **Market validation** runs competitor analysis and viability scoring
+3. **Feature brainstorming** prioritizes your MVP feature set
+4. **Brand generation** creates names, checks domain availability, builds color palettes
+5. **Logo design** generates custom logos with AI
+6. **Code generation** writes a full React + Tailwind website
+7. **Live preview** renders in a cloud sandbox in real-time
+8. **Export** to Vercel or GitHub with one click
+9. **Version history** tracks every iteration
+
+The entire process takes under five minutes.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js, React, TypeScript, Tailwind CSS |
+| AI Models | Gemini 3 Pro (validation, features, code), Gemini 3 Flash (naming, colors, logos) |
+| Auth & Data | Firebase Authentication, Firestore |
+| Code Sandbox | E2B Cloud Sandbox |
+| Deployment | Vercel |
+| AI SDK | Google AI SDK (@google/genai) |
+
+---
+
+## Gemini 3 Integration
+
+LaunchKit uses two Gemini 3 models across the entire pipeline. No other LLM is involved.
+
+**Gemini 3 Pro** handles:
+- Market validation with structured competitor analysis
+- Feature brainstorming with MVP prioritization via function calling
+- Full website code generation through streaming function calls
+- Agentic mode with tool use and self-repair
+
+**Gemini 3 Flash** handles:
+- Brand name generation (sub-second responses)
+- Color palette creation based on brand personality
+- Logo concept generation
+
+**Key Gemini 3 features used:**
+- Streaming function calls for real-time code generation
+- Structured output for market data and feature lists
+- Multi-turn tool use in agentic mode
+- Automatic error recovery with re-prompting
+
+---
+
+## Generation Modes
+
+### Fast Mode
+Single-shot generation. One API call produces all files. Best for speed.
+
+### Agentic Mode
+Multi-step generation with tool use. The model plans, writes, tests, and repairs code across multiple turns. Best for complex sites.
+
+### Self-Healing Pipeline
+If Fast Mode fails, LaunchKit falls back to Agentic Mode. If Agentic Mode encounters errors, it re-prompts with error context. Users see a working result without manual intervention.
+
+---
+
+## Project Structure
+
+```
+launchpad/
+├── src/
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── builder/stream/    # Main code generation endpoint
+│   │   │   ├── brand/             # Brand name generation
+│   │   │   ├── colors/            # Color palette generation
+│   │   │   ├── features/          # Feature brainstorming
+│   │   │   ├── logo/              # Logo generation
+│   │   │   ├── market/            # Market validation
+│   │   │   └── export/            # Vercel/GitHub export
+│   │   ├── auth/                  # Authentication pages
+│   │   ├── builder/               # Builder UI (code editor + preview)
+│   │   ├── dashboard/             # Project dashboard
+│   │   └── page.tsx               # Landing page
+│   ├── components/                # Reusable UI components
+│   ├── contexts/                  # React contexts (auth, theme)
+│   ├── lib/                       # Utilities (Firebase, Gemini client)
+│   └── types/                     # TypeScript type definitions
+├── public/                        # Static assets
+└── package.json
+```
+
+---
 
 ## Getting Started
 
-First, run the development server:
+### Prerequisites
+
+- Node.js 18+
+- npm or yarn
+- Google AI API key (Gemini 3)
+- Firebase project (for auth and data)
+- E2B API key (for code sandbox)
+
+### Environment Variables
+
+Create a `.env.local` file:
+
+```env
+# Gemini 3
+GOOGLE_AI_API_KEY=your_gemini_api_key
+
+# Firebase
+NEXT_PUBLIC_FIREBASE_API_KEY=your_firebase_api_key
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=your_project.firebaseapp.com
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=your_project_id
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=your_project.appspot.com
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
+NEXT_PUBLIC_FIREBASE_APP_ID=your_app_id
+
+# E2B Sandbox
+E2B_API_KEY=your_e2b_api_key
+```
+
+### Run Locally
 
 ```bash
+# Install dependencies
+npm install
+
+# Start development server
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) to see LaunchKit.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Deploy
 
-## Learn More
+### Vercel (Recommended)
 
-To learn more about Next.js, take a look at the following resources:
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/Karanjot786/LaunchKit)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Click the button above or import the repo on Vercel
+2. Add environment variables in the Vercel dashboard
+3. Deploy
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Manual
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
-
-## Builder Pipeline V2
-
-The streaming builder endpoint (`/api/builder/stream`) now supports hybrid generation strategies:
-
-- `fast_json`: low-latency generation path (default).
-- `plan_driven`: planner -> designer -> coder -> repairer flow.
-- `template_fill`: deterministic section template composition for business sites.
-
-### Request Shape
-
-```ts
-interface BuildRequestV2 {
-  message: string;
-  brandContext: BrandContext;
-  currentFiles?: Record<string, string>;
-  mode?: "fast" | "agentic";
-  strategy?: "fast_json" | "plan_driven" | "template_fill";
-  quality?: "speed" | "balanced" | "high";
-  templateId?: string;
-}
+```bash
+npm run build
+npm start
 ```
 
-### Rollout Flag
+---
 
-Set `BUILDER_PIPELINE_V2=true` to enable non-default orchestration paths (`plan_driven`, `template_fill`) in production traffic.
+## License
 
-When disabled, the API falls back to `fast_json` unless legacy `mode: "agentic"` is explicitly used.
+MIT
 
-### Stage Status Markers
+---
 
-Status updates follow stage prefixes for observability:
-
-- `planning`
-- `designing`
-- `coding`
-- `repairing`
-- `finalizing`
-
-## Local Agent Profile (Dev-only)
-
-For local experimentation you can run an external coding agent (including Gemini CLI) against generated projects while keeping production traffic on server-managed Gemini API.
-
-Example local workflow:
-
-1. Terminal A: run `npm run dev`.
-2. Terminal B: run your agent in the generated app directory (for example, `npx gemini`).
-3. Keep this mode for development only; production should use server-side API orchestration.
+Built with Gemini 3 for the [Google DeepMind Gemini 3 Hackathon](https://gemini3.devpost.com).

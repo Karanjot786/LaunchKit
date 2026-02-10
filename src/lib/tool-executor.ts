@@ -300,7 +300,7 @@ export class ToolExecutor {
      * Edit a file with multi-strategy fallback
      */
     private executeEditFile(args: Record<string, unknown>): ToolCallResult {
-        const filePath = args.file_path as string;
+        const filePath = (args.file_path as string || "").replace(/^['"`]+|['"`]+$/g, "").trim();
         const oldString = args.old_string as string;
         const newString = args.new_string as string;
         const explanation = args.explanation as string;
@@ -364,7 +364,7 @@ export class ToolExecutor {
      * Read a file's contents
      */
     private executeReadFile(args: Record<string, unknown>): ToolCallResult {
-        const filePath = args.file_path as string;
+        const filePath = (args.file_path as string || "").replace(/^['"`]+|['"`]+$/g, "").trim();
         const content = this.store.read(filePath);
 
         if (content === null) {
@@ -385,7 +385,7 @@ export class ToolExecutor {
      * Delete a file
      */
     private executeDeleteFile(args: Record<string, unknown>): ToolCallResult {
-        const filePath = args.file_path as string;
+        const filePath = (args.file_path as string || "").replace(/^['"`]+|['"`]+$/g, "").trim();
         const reason = args.reason as string;
 
         if (!this.store.exists(filePath)) {

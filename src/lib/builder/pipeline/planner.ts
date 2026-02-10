@@ -124,6 +124,10 @@ export async function runPlanner(input: PlannerInput): Promise<PlannerOutput> {
         `Brand tagline: ${brandContext.tagline}`,
         `Target audience: ${brandContext.validation.category?.targetAudience || "general users"}`,
         `Prompt intent: ${message}`,
+        "REQUIRED sections (always include in plan): navbar, hero, stats-bar (3-4 metrics), features (with lucide-react icons), testimonials-or-social-proof, cta-section, footer (multi-column).",
+        "Each componentPlan entry must specify visual elements: e.g. 'Feature grid with Shield/Zap/Target icons from lucide-react, hover:-translate-y-1 card animations'.",
+        "The plan MUST include a StatsBar component showing impressive metrics.",
+        "acceptanceCriteria MUST include: 'All feature cards have lucide-react icons', 'Stats section is present', 'CTA section has gradient background'.",
     ].join("\n");
 
     try {

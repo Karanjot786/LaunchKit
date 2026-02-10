@@ -1123,6 +1123,10 @@ async function writeFiles(sessionId: string, files: Record<string, string>) {
       // Entry points
       "src/main.tsx", "/src/main.tsx",
       "src/ErrorBoundary.tsx", "/src/ErrorBoundary.tsx",
+      // Prevent AI from creating conflicting entry points or CSS files
+      "src/index.tsx", "/src/index.tsx",
+      "src/styles.css", "/src/styles.css",
+      "src/globals.css", "/src/globals.css",
     ]);
 
     for (const [path, content] of Object.entries(files)) {
@@ -1130,6 +1134,14 @@ async function writeFiles(sessionId: string, files: Record<string, string>) {
       const normalizedPath = path.startsWith("/") ? path.slice(1) : path;
       if (PROTECTED_FILES.has(path) || PROTECTED_FILES.has(normalizedPath)) {
         console.log(`[E2B] Skipping protected file: ${path}`);
+        continue;
+      }
+
+      // Skip non-code file paths (leaked from result object properties)
+      const basename = normalizedPath.split('/').pop() || normalizedPath;
+      const INVALID_FILE_NAMES = ['base_content', 'message', 'complete', 'status', 'done', 'error'];
+      if (INVALID_FILE_NAMES.includes(basename) || !basename.includes('.')) {
+        console.log(`[E2B] Skipping invalid file path: ${path}`);
         continue;
       }
 

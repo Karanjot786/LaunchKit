@@ -296,7 +296,8 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
             });
 
             if (Object.keys(updatesToApply).length > 0) {
-                setFiles((prev) => ({ ...prev, ...updatesToApply }));
+                // Replace files with streaming state (don't merge old files on top)
+                setFiles(streaming.files);
                 // Files are written to E2B in the startE2BServer effect after streaming completes
             }
         }
@@ -354,8 +355,8 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         }
     }, [streaming.isStreaming, useE2B, isSandboxReady, files]);
 
-    // Version history with Firebase persistence
-    const { snapshots, canUndo, canRedo, isLoading: historyLoading, createSnapshot, clearHistory, undoChanges, redoChanges, restoreSnapshot } = useVersionHistory(files, { projectId });
+    // Version history with Firebase persistence — suppress auto-snapshots during streaming
+    const { snapshots, canUndo, canRedo, isLoading: historyLoading, createSnapshot, clearHistory, undoChanges, redoChanges, restoreSnapshot } = useVersionHistory(files, { projectId, isStreaming: streaming.isStreaming });
 
     // Panel state
     const [isHistoryPanelOpen, setIsHistoryPanelOpen] = useState(false);
@@ -375,7 +376,15 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         saveTimeoutRef.current = setTimeout(async () => {
             setSaveStatus("saving");
             try {
-                await onProjectUpdate({ files, updatedAt: new Date() });
+                // Filter out any non-code file paths before saving to Firestore
+                const codeFiles = Object.fromEntries(
+                    Object.entries(files).filter(([path]) => {
+                        const basename = path.split('/').pop() || path;
+                        const invalidNames = ['base_content', 'message', 'complete', 'status', 'done', 'error'];
+                        return basename.includes('.') && !invalidNames.includes(basename);
+                    })
+                );
+                await onProjectUpdate({ files: codeFiles, updatedAt: new Date() });
                 setSaveStatus("saved");
             } catch (error) {
                 console.error("Auto-save failed:", error);
@@ -759,15 +768,30 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                 // Reset E2B server started flag for new generation
                 e2bServerStartedRef.current = false;
 
+                // Clear old files BEFORE generating new ones
+                setFiles({});
+                lastUpdateCountRef.current = 0;
+
                 await streaming.generate(content, currentBrand, { mode: "fast" });
 
-                // After streaming completes
-                const finalFiles = streaming.files;
+                // After streaming completes, use the latest streaming files
+                // (streaming.files is accumulated via handleEvent during the stream)
+                const finalFiles = { ...streaming.files };
 
-                // Ensure everything is synced
-                setFiles(finalFiles);
-                if (onProjectUpdate) {
-                    onProjectUpdate({ files: finalFiles, updatedAt: new Date() });
+                // Ensure local state is synced with streaming result
+                if (Object.keys(finalFiles).length > 0) {
+                    setFiles(finalFiles);
+                    if (onProjectUpdate) {
+                        // Filter non-code paths before persisting
+                        const codeFiles = Object.fromEntries(
+                            Object.entries(finalFiles).filter(([path]) => {
+                                const basename = path.split('/').pop() || path;
+                                const invalidNames = ['base_content', 'message', 'complete', 'status', 'done', 'error'];
+                                return basename.includes('.') && !invalidNames.includes(basename);
+                            })
+                        );
+                        onProjectUpdate({ files: codeFiles, updatedAt: new Date() });
+                    }
                 }
 
                 const assistantMessage: Message = {

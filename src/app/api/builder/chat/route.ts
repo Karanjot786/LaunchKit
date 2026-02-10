@@ -19,7 +19,7 @@ const ai = new GoogleGenAI({
     },
 });
 
-export const maxDuration = 900; // 15 minutes
+export const maxDuration = 800; // ~13 minutes (Vercel Pro plan max)
 
 const MODEL = "gemini-3-flash-preview";
 

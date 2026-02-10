@@ -303,7 +303,7 @@ function buildSystemPrompt(brand: BrandContext): string {
     const brandToon = encodeBrandContext({
         name: brand.name,
         tagline: brand.tagline,
-        logo: null, // Don't pass logo - handled separately by frontend
+        logo: "/logo_image.png", // Logo is written to sandbox at public/logo_image.png
         colorPalette: brand.colorPalette,
         category: brand.validation.category?.primary,
         targetAudience: brand.validation.category?.targetAudience,
@@ -337,6 +337,9 @@ PROJECT STRUCTURE
 ═══════════════════════════════════════════════════════════════════════════════
 PRE-BUILT FILES (already exist, do NOT create):
 ├── public/logo_image.png        - Brand logo image (USE THIS for logo display!)
+├── src/main.tsx                 - App entry point (DO NOT CREATE)
+├── src/index.css                - Base CSS with Tailwind + CSS variables (DO NOT CREATE)
+├── src/ErrorBoundary.tsx        - Error boundary wrapper (DO NOT CREATE)
 ├── src/lib/firebase.ts          - Firebase app initialization
 ├── src/lib/utils.ts             - cn() utility function
 ├── src/contexts/AuthContext.tsx - { useAuth, AuthProvider }
@@ -347,11 +350,19 @@ PRE-BUILT FILES (already exist, do NOT create):
 
 ★ BRAND LOGO ★
 The brand logo is available at: /logo_image.png
-Use it in components like: <img src="/logo_image.png" alt="${brand.name} logo" />
+Use it in components like: <img src="/logo_image.png" alt="${brand.name} logo" className="h-8 w-auto" />
+ALWAYS use the logo image in the Navbar and Footer — never use text-only brand names when the logo exists.
+
+★ FORBIDDEN FILES — DO NOT CREATE THESE ★
+- src/index.tsx          ← NEVER create this. src/main.tsx is the entry point.
+- src/main.tsx           ← Already exists. Do not overwrite.
+- src/index.css          ← Already exists with Tailwind base + CSS variables. Do not overwrite.
+- src/styles.css         ← NEVER create this. All custom styles go in component files using Tailwind classes.
+- src/globals.css        ← NEVER create this. Use Tailwind utility classes instead.
 
 FILES YOU MUST CREATE:
 ├── src/App.tsx                  - Main app with routing (REQUIRED)
-├── src/components/Navbar.tsx    - Navigation bar
+├── src/components/Navbar.tsx    - Navigation bar (MUST include <img src="/logo_image.png" />)
 ├── src/components/Hero.tsx      - Hero section (landing pages)
 ├── src/components/Features.tsx  - Features section
 ├── src/components/Footer.tsx    - Footer
@@ -417,14 +428,173 @@ Pre-built Auth Components:
   import { LoginForm, SignupForm, ProtectedRoute, UserMenu } from "@/components/auth"
 
 ═══════════════════════════════════════════════════════════════════════════════
-DESIGN GUIDELINES
+DESIGN GUIDELINES (CRITICAL — follow every rule strictly)
 ═══════════════════════════════════════════════════════════════════════════════
-- Use brand colors via Tailwind: bg-primary, text-primary-foreground, bg-secondary, etc.
-- Mobile-first responsive: base styles, then sm:, md:, lg:, xl:
-- Add hover/focus states: hover:bg-primary/90, focus:ring-2
-- Use framer-motion for animations: motion.div with initial/animate/transition
-- Use lucide-react for icons: import { IconName } from "lucide-react"
-- NO placeholder content - use real ${brand.name} brand content
+
+★ DESIGN PHILOSOPHY ★
+Build distinctive, production-grade interfaces that avoid generic "AI slop"
+aesthetics. Every interface should feel intentionally designed, memorable,
+and polished. Bold maximalism and refined minimalism both work — the key is
+INTENTIONALITY, not intensity.
+
+Before coding each component, commit to:
+- A clear aesthetic direction (luxury/refined, bold/modern, playful, editorial, brutalist, etc.)
+- A memorable differentiator — what will someone remember about this site?
+- Cohesive execution — every element should reinforce the chosen direction
+
+★ ICONS (MANDATORY — never skip) ★
+Every feature card, service item, or benefit MUST have a lucide-react icon.
+  import { Shield, Zap, BarChart3, Users, Globe, Lock, Rocket, Star, Heart, Target } from "lucide-react"
+
+Render icons inside a styled container — NEVER as raw icons or empty circles:
+  <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+    <Zap className="w-6 h-6 text-primary" />
+  </div>
+
+ABSOLUTE RULE: NEVER render empty colored divs/circles as icon placeholders.
+If you mention an icon, you MUST import and render it from lucide-react.
+
+★ TYPOGRAPHY HIERARCHY ★
+Use Google Fonts or system fonts with clear weight/size differentiation:
+  - Hero title: text-5xl md:text-7xl font-bold tracking-tight
+    Consider gradient text: bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent
+  - Section titles: text-3xl md:text-4xl font-bold — add one colored ACCENT word
+  - Section subtitles: text-lg text-muted-foreground max-w-2xl mx-auto text-center
+  - Card titles: text-xl font-semibold
+  - Body text: text-base leading-relaxed text-muted-foreground
+
+★ STATS/SOCIAL PROOF BAR (REQUIRED — always include) ★
+Add a stats bar between hero and features with 3-4 impressive metrics:
+  <section className="border-y bg-muted/30 py-12">
+    <div className="max-w-7xl mx-auto px-4 grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
+      <div><p className="text-3xl md:text-4xl font-bold text-primary">2.4M+</p><p className="text-sm text-muted-foreground">Active Users</p></div>
+      ...
+    </div>
+  </section>
+
+★ CARDS & FEATURE GRIDS ★
+Every card MUST have: icon (lucide-react) + title + description
+  - Use Card component or styled divs with: rounded-xl border bg-card shadow-sm
+  - Add hover effects: hover:shadow-lg hover:-translate-y-1 transition-all duration-300
+  - Grid layout: grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6
+  - Cards should feel tangible — border, shadow, background differentiation
+
+★ HERO SECTION ★
+The hero is the first impression — make it unforgettable:
+  - Large bold title with strong visual weight
+  - Clear subtitle explaining the value proposition
+  - Two CTAs: primary (filled) and secondary (outline)
+  - Visual element: gradient background, illustration, or brand imagery
+  - Generous padding: py-20 md:py-32
+
+★ CTA SECTION (REQUIRED — before footer) ★
+Full-width call-to-action section:
+  - Gradient or brand-colored background
+  - Bold headline + supporting text + prominent CTA button
+  - Add subtle pattern or texture for depth
+
+★ COLORS & THEME (CRITICAL — MUST READ) ★
+
+THEME: LIGHT MODE ONLY. Background is WHITE. Text must be DARK.
+CSS variables use HSL in index.css: :root { --primary: H S% L%; }.
+A .dark class variant exists — DO NOT USE IT EVER.
+
+██████████████████████████████████████████████████████████████
+██  TEXT VISIBILITY RULE #1: ALL HEADINGS MUST BE DARK      ██
+██  On white/light backgrounds, EVERY heading must use:     ██
+██  text-gray-900 or text-slate-900 or text-foreground      ██
+██  NEVER use text-primary or text-blue-* for headings —    ██
+██  brand color is too light to read on white backgrounds!  ██
+██████████████████████████████████████████████████████████████
+
+MANDATORY TEXT COLOR RULES (violating these = broken site):
+  1. HEADINGS (h1, h2, h3): ALWAYS className="text-gray-900" or "text-slate-900"
+     - Hero title: text-gray-900 (on light bg) or text-white (on dark/gradient bg)
+     - Section titles: text-gray-900 — NEVER text-primary, NEVER text-blue-*
+     - Card titles: text-gray-900
+  2. BODY TEXT / DESCRIPTIONS: text-gray-600 or text-gray-700 or text-muted-foreground
+     - Subtitles: text-gray-600 text-lg
+     - Card descriptions: text-gray-600 or text-muted-foreground
+     - Feature descriptions: text-gray-600
+  3. BRAND COLOR TEXT: ONLY for small accent elements:
+     - Badge labels, tag text, icon containers, small labels
+     - NEVER for headings, NEVER for paragraph text
+  4. ON GRADIENT/DARK BACKGROUNDS (hero with gradient, CTA sections):
+     - ALL text must be text-white — headings AND body text
+     - Do NOT use text-gray-900 on dark backgrounds
+  5. NAVBAR TEXT: text-gray-700 hover:text-gray-900 (on white navbar bg)
+  6. FOOTER: If dark bg → text-gray-300 for body, text-white for headings
+            If light bg → text-gray-900 for headings, text-gray-600 for body
+
+HERO SECTION PATTERN (choose ONE):
+  Option A — Light hero (white/light gray bg):
+    bg-white or bg-gradient-to-b from-blue-50 to-white
+    Title: text-gray-900 text-4xl md:text-6xl font-bold
+    Subtitle: text-gray-600 text-xl
+    → Accent: A single word can be text-primary, e.g. "Train <span className='text-primary'>Smarter</span>"
+  
+  Option B — Dark hero (gradient bg):
+    bg-gradient-to-br from-primary to-primary/80
+    Title: text-white text-4xl md:text-6xl font-bold
+    Subtitle: text-white/80 text-xl
+
+CHECKLIST — verify EVERY section before finishing:
+  □ Hero heading → text-gray-900 or text-white (NOT text-primary)
+  □ Hero subtitle → text-gray-600 or text-white/80 (NOT text-primary/60)
+  □ Stats numbers → text-gray-900 font-bold (labels: text-gray-500)
+  □ Section headings → text-gray-900 (NOT text-primary)
+  □ Feature card titles → text-gray-900
+  □ Feature card descriptions → text-gray-600
+  □ CTA heading → text-white (on gradient bg)
+  □ Navbar links → text-gray-700
+  □ Footer text → text-gray-300 (dark bg) or text-gray-600 (light bg)
+
+SEMANTIC TAILWIND COLORS:
+  - bg-primary = brand color (for buttons, badges, accents)
+  - text-primary-foreground = white (text ON primary-colored elements)
+  - bg-card = white, text-card-foreground = dark text
+  - bg-muted/50 = light gray section background
+  - text-muted-foreground = gray-500/600 equivalent
+
+★ SPACING & LAYOUT ★
+  - Section padding: py-20 md:py-32 for generous vertical rhythm
+  - Container: max-w-7xl mx-auto px-4 sm:px-6 lg:px-8
+  - Element spacing: space-y-4 for stacked text, gap-6 for grids
+  - Use negative space intentionally — don't cram content
+
+★ ANIMATIONS & MOTION ★
+  - Use framer-motion for page load reveals and hover interactions
+  - Hero entrance: motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
+  - Card hover: whileHover={{ y: -4 }} transition={{ duration: 0.2 }}
+  - Stagger children for grid reveals using transition={{ delay: index * 0.1 }}
+  - Focus on high-impact moments — one great page load beats scattered effects
+
+★ FOOTER ★
+  - Multi-column layout: Brand info, Product links, Company links, Resources
+  - Include brand logo: <img src="/logo_image.png" alt="${brand.name}" className="h-8" />
+  - Bottom bar with copyright and legal links
+  - Responsive: stack on mobile, columns on desktop
+
+★ RESPONSIVE DESIGN ★
+  - Mobile-first: base styles, then sm:, md:, lg:, xl:
+  - Navigation: hamburger menu on mobile, horizontal on desktop
+  - Grids: single column on mobile, multi-column on desktop
+  - Text sizes: smaller base, larger on md: and lg:
+
+★ ANTI-PATTERNS (NEVER DO THESE) ★
+  - ❌ Using text-primary or text-blue-* for headings on white backgrounds — INVISIBLE TEXT
+  - ❌ Using light-colored text (text-primary/60, text-blue-400) for descriptions
+  - ❌ Headings without explicit text-gray-900 class
+  - ❌ Empty colored circles/divs as icon placeholders
+  - ❌ Skipping the stats/social-proof section
+  - ❌ Generic/boring hero with just text and no visual impact
+  - ❌ Cards without icons
+  - ❌ Uniform text sizes (no visual hierarchy)
+  - ❌ Missing hover/focus states on interactive elements
+  - ❌ Placeholder "Lorem ipsum" or fake content — use real ${brand.name} content
+  - ❌ Cookie-cutter layouts that lack context-specific character
+  - ❌ Using class="dark" or dark mode
+  - ❌ Forgetting to set explicit text color on every text element
 
 ═══════════════════════════════════════════════════════════════════════════════
 EXECUTION ORDER
@@ -608,7 +778,7 @@ async function handleFastMode(
                             functionCallingConfig: {
                                 // ANY mode FORCES the model to call a tool (no text-only responses)
                                 mode: FunctionCallingConfigMode.ANY,
-                                allowedFunctionNames: ["write_file", "complete"],
+                                allowedFunctionNames: ["write_file", "install_components", "install_packages", "complete"],
                             },
                         },
                         thinkingConfig: {
@@ -654,8 +824,11 @@ async function handleFastMode(
                     const { name, args } = part.functionCall;
 
                     if (name === "write_file" && args) {
-                        const filePath = args.file_path as string;
+                        let filePath = (args.file_path as string || "").trim();
                         const content = args.content as string;
+
+                        // Sanitize file path: strip quotes, backticks, and whitespace the model occasionally adds
+                        filePath = filePath.replace(/^['"`]+|['"`]+$/g, "").trim();
 
                         if (filePath && content) {
                             const isNew = !currentFiles[filePath];
@@ -798,7 +971,9 @@ async function handleFastMode(
         });
 
         send({ type: "status", data: { status: `coding: Fast mode incomplete, switching to agentic mode (${REDUCED_AGENTIC_TURNS} turns)...` } });
-        const fallback = await handleAgenticMode(message, brandContext, currentFiles, send, quality, fallbackContext);
+        // Pass empty currentFiles — agentic generates a fresh complete set.
+        // currentFiles here already contains fast mode's partial output, which would cause duplication.
+        const fallback = await handleAgenticMode(message, brandContext, {}, send, quality, fallbackContext);
         return {
             ...fallback,
             fallbackPath: "agentic_fallback",

@@ -147,10 +147,13 @@ export async function runBuilderPipeline(context: PipelineRunContext): Promise<G
             };
         } else {
             sendStageStatus(context.send, "repairing", "Repairer was insufficient. Falling back to agentic...");
+            // Pass empty currentFiles — agentic mode generates a fresh set.
+            // Using context.currentFiles here would merge fast mode's files with agentic's,
+            // causing file duplication (e.g., 7 fast + 8 agentic = 15 files).
             const fallback = await context.handlers.runAgentic(
                 context.message,
                 context.brandContext,
-                context.currentFiles,
+                {},
                 context.send,
                 context.quality
             );
