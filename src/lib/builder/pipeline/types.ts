@@ -22,6 +22,7 @@ export interface BrandContext {
         opportunities?: string[];
         proposedFeatures?: { title: string; description: string; priority: string }[];
     };
+    selectedFeatures?: { id: string; title: string; description: string; category: string }[];
 }
 
 export interface BuildRequestV2 {

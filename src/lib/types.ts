@@ -1,4 +1,4 @@
-// Type definitions for LaunchPad
+// Type definitions for LaunchKit
 
 export interface ValidationResult {
     viabilityScore: number;

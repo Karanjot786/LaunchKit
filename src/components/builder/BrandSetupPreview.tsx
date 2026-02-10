@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Check, Sparkles, Zap, TrendingUp, Users, Target, Globe, ExternalLink } from "lucide-react";
 
@@ -50,16 +51,24 @@ interface LogoSuggestion {
     image: string;
 }
 
+interface FeatureSuggestion {
+    title: string;
+    description: string;
+    category?: string;
+    priority?: string;
+}
+
 interface BrandSetupPreviewProps {
     brand: BrandContext;
     isValidating?: boolean;
     suggestions?: {
-        type: "names" | "colors" | "logos" | null;
+        type: "names" | "colors" | "logos" | "features" | null;
         data: unknown[];
     };
     onSelectName?: (name: NameSuggestion) => void;
     onSelectColors?: (palette: ColorPalette) => void;
     onSelectLogo?: (logoUrl: string) => void;
+    onSelectFeatures?: (features: FeatureSuggestion[]) => void;
 }
 
 export function BrandSetupPreview({
@@ -68,7 +77,8 @@ export function BrandSetupPreview({
     suggestions,
     onSelectName,
     onSelectColors,
-    onSelectLogo
+    onSelectLogo,
+    onSelectFeatures
 }: BrandSetupPreviewProps) {
     const hasValidation = brand.validation && Object.keys(brand.validation).length > 0 && brand.validation.category;
     const hasName = brand.name && brand.name !== "Untitled Project";
@@ -231,6 +241,155 @@ export function BrandSetupPreview({
                             </motion.button>
                         ))}
                     </div>
+                </div>
+            </div>
+        );
+    }
+
+    // Render feature suggestions
+    if (suggestions?.type === "features" && suggestions.data.length > 0) {
+        const features = suggestions.data as FeatureSuggestion[];
+        const mvpFeatures = features.filter(f => f.category === "MVP" || f.category === "mvp" || f.priority === "high");
+        const stretchFeatures = features.filter(f => f.category === "stretch" || f.priority === "medium");
+        const moonshots = features.filter(f => f.category === "moonshot" || f.priority === "low");
+
+        // State for selected features
+        const [selectedFeatures, setSelectedFeatures] = useState<Set<string>>(
+            new Set(mvpFeatures.map(f => f.title)) // MVP features selected by default
+        );
+
+        const toggleFeature = (title: string) => {
+            setSelectedFeatures(prev => {
+                const next = new Set(prev);
+                if (next.has(title)) {
+                    next.delete(title);
+                } else {
+                    next.add(title);
+                }
+                return next;
+            });
+        };
+
+        const FeatureCard = ({ feature, delay, borderColor, bgColor }: {
+            feature: FeatureSuggestion;
+            delay: number;
+            borderColor: string;
+            bgColor: string;
+        }) => {
+            const isSelected = selectedFeatures.has(feature.title);
+            return (
+                <motion.button
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay }}
+                    onClick={() => toggleFeature(feature.title)}
+                    className={`text-left w-full rounded-xl p-4 transition-all border ${isSelected
+                        ? `${bgColor} ${borderColor} ring-2 ring-offset-2 ring-offset-zinc-900`
+                        : "bg-zinc-800/30 border-zinc-700/50 hover:border-zinc-600"
+                        }`}
+                >
+                    <div className="flex items-start gap-3">
+                        <div className={`mt-0.5 w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all ${isSelected
+                            ? `${borderColor.replace('/20', '')} bg-${borderColor.split('-')[1]}-500/20`
+                            : "border-zinc-600"
+                            }`}>
+                            {isSelected && <Check className="w-3 h-3 text-white" />}
+                        </div>
+                        <div className="flex-1">
+                            <h4 className="text-white font-medium mb-1">{feature.title}</h4>
+                            <p className="text-zinc-400 text-sm">{feature.description}</p>
+                        </div>
+                    </div>
+                </motion.button>
+            );
+        };
+
+        return (
+            <div className="flex-1 bg-gradient-to-br from-zinc-900 via-zinc-900 to-zinc-950 overflow-y-auto p-6">
+                <div className="max-w-4xl mx-auto">
+                    <div className="flex items-center justify-between mb-2">
+                        <h2 className="text-xl font-bold text-white">Feature Brainstorm</h2>
+                        <span className="text-sm text-zinc-400">{selectedFeatures.size} selected</span>
+                    </div>
+                    <p className="text-zinc-400 mb-6">Click to select features for your MVP</p>
+
+                    {/* MVP Features */}
+                    {mvpFeatures.length > 0 && (
+                        <div className="mb-6">
+                            <h3 className="flex items-center gap-2 text-sm font-medium text-emerald-400 mb-3">
+                                <Zap className="w-4 h-4" />
+                                MVP Features ({mvpFeatures.length})
+                            </h3>
+                            <div className="grid gap-3">
+                                {mvpFeatures.map((feature, i) => (
+                                    <FeatureCard
+                                        key={feature.title}
+                                        feature={feature}
+                                        delay={i * 0.05}
+                                        borderColor="border-emerald-500/20"
+                                        bgColor="bg-emerald-500/10"
+                                    />
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Stretch Features */}
+                    {stretchFeatures.length > 0 && (
+                        <div className="mb-6">
+                            <h3 className="flex items-center gap-2 text-sm font-medium text-cyan-400 mb-3">
+                                <TrendingUp className="w-4 h-4" />
+                                Nice-to-Have ({stretchFeatures.length})
+                            </h3>
+                            <div className="grid gap-3">
+                                {stretchFeatures.map((feature, i) => (
+                                    <FeatureCard
+                                        key={feature.title}
+                                        feature={feature}
+                                        delay={0.2 + i * 0.05}
+                                        borderColor="border-cyan-500/20"
+                                        bgColor="bg-cyan-500/10"
+                                    />
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Moonshots */}
+                    {moonshots.length > 0 && (
+                        <div className="mb-6">
+                            <h3 className="flex items-center gap-2 text-sm font-medium text-purple-400 mb-3">
+                                <Sparkles className="w-4 h-4" />
+                                Moonshots ({moonshots.length})
+                            </h3>
+                            <div className="grid gap-3">
+                                {moonshots.map((feature, i) => (
+                                    <FeatureCard
+                                        key={feature.title}
+                                        feature={feature}
+                                        delay={0.4 + i * 0.05}
+                                        borderColor="border-purple-500/20"
+                                        bgColor="bg-purple-500/10"
+                                    />
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Confirm selection button */}
+                    <motion.button
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: 0.5 }}
+                        onClick={() => {
+                            const selected = features.filter(f => selectedFeatures.has(f.title));
+                            onSelectFeatures?.(selected);
+                        }}
+                        className="w-full mt-4 py-3 px-4 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-400 hover:to-blue-400 text-white font-medium rounded-xl transition-all flex items-center justify-center gap-2"
+                    >
+                        <Check className="w-4 h-4" />
+                        Confirm {selectedFeatures.size} Features
+                    </motion.button>
                 </div>
             </div>
         );

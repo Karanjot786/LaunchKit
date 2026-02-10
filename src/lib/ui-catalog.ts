@@ -1,5 +1,5 @@
 /**
- * UI Component Catalog for LaunchPad
+ * UI Component Catalog for LaunchKit
  * 
  * Defines the component types available for instant preview rendering.
  * Based on Vercel JSON-Render approach for streaming UI generation.
@@ -12,7 +12,7 @@ import { z } from "zod";
 // =============================================================================
 
 export const landingPageCatalog = {
-    name: "launchpad-ui",
+    name: "LaunchKit-ui",
     components: {
         // =========================================================================
         // LAYOUT COMPONENTS

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { genAI, MODELS } from "@/lib/gemini";
-import { db } from "@/lib/firebase";
-import { doc, updateDoc } from "firebase/firestore";
 
 // Logo style variations
 const LOGO_STYLES = [
@@ -85,7 +83,8 @@ Output: A single clean logo using the brand colors, centered on white background
 
         for (const part of response.candidates?.[0]?.content?.parts || []) {
             if (part.inlineData) {
-                return `data:image/png;base64,${part.inlineData.data}`;
+                // Return raw base64 data (for Storage upload)
+                return part.inlineData.data as string;
             }
         }
     } catch (error) {
@@ -118,47 +117,32 @@ export async function POST(request: NextRequest) {
 
         const results = await Promise.all(logoPromises);
 
-        // Filter out failed generations
-        const logos = results
-            .map((logo, index) => ({
+        // Filter out failed generations and prepare for upload
+        const generatedLogos = results
+            .map((base64Data, index) => ({
                 id: index,
                 style: selectedStyles[index].name,
-                image: logo,
+                base64Data,
             }))
-            .filter((item) => item.image !== null);
+            .filter((item) => item.base64Data !== null);
 
-        if (logos.length === 0) {
+        if (generatedLogos.length === 0) {
             return NextResponse.json(
                 { error: "Failed to generate any logos" },
                 { status: 500 }
             );
         }
 
-        console.log(`Successfully generated ${logos.length} logos`);
+        console.log(`Successfully generated ${generatedLogos.length} logos`);
 
-        // Persist to Firestore subcollection (not main document) to avoid 1MB limit
-        if (projectId && db) {
-            try {
-                const { collection: fbCollection, addDoc, getDocs, deleteDoc } = await import("firebase/firestore");
-                const logosCollectionRef = fbCollection(db, "builder_projects", projectId, "logo_options");
-
-                // Clear existing logos first
-                const existingLogos = await getDocs(logosCollectionRef);
-                await Promise.all(existingLogos.docs.map(d => deleteDoc(d.ref)));
-
-                // Save each logo as a separate document
-                await Promise.all(logos.map(logo =>
-                    addDoc(logosCollectionRef, {
-                        style: logo.style,
-                        image: logo.image,
-                        createdAt: new Date(),
-                    })
-                ));
-                console.log(`Saved ${logos.length} logos to subcollection for project ${projectId}`);
-            } catch (dbError) {
-                console.error("Failed to save logos to database:", dbError);
-                // Don't fail the request if DB save fails
-            }
+        // Return data URLs for preview - only the selected logo will be uploaded later
+        const logos: { id: number; style: string; image: string }[] = [];
+        for (const logo of generatedLogos) {
+            logos.push({
+                id: logo.id,
+                style: logo.style,
+                image: `data:image/png;base64,${logo.base64Data}`,
+            });
         }
 
         return NextResponse.json({

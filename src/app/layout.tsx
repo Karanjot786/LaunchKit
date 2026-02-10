@@ -6,7 +6,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "LaunchPad - From Idea to Launch in 10 Minutes",
+  title: "LaunchKit - From Idea to Launch in 10 Minutes",
   description: "AI-powered startup launcher. Generate your brand, website, and full application with one prompt.",
   keywords: ["startup", "AI", "Gemini", "website generator", "brand generator"],
 };

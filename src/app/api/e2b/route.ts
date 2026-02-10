@@ -13,7 +13,7 @@ const SANDBOX_TIMEOUT = 5 * 60 * 1000;
 
 const DEFAULT_TEMPLATE_FILES: Record<string, string> = {
   "package.json": JSON.stringify({
-    name: "launchpad-app",
+    name: "LaunchKit-app",
     version: "1.0.0",
     type: "module",
     scripts: {
@@ -164,7 +164,7 @@ export default {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LaunchPad App</title>
+    <title>LaunchKit App</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   </head>
   <body>
@@ -567,7 +567,7 @@ export default function App() {
       <Card className="w-full max-w-md bg-slate-900/50 border-slate-700">
         <CardHeader>
           <Badge className="w-fit mb-2">Ready</Badge>
-          <CardTitle className="text-white">🚀 LaunchPad</CardTitle>
+          <CardTitle className="text-white">🚀 LaunchKit</CardTitle>
           <CardDescription>Your app template is ready. Start chatting to build!</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -974,6 +974,8 @@ export async function POST(request: NextRequest) {
         return await createSandbox(sessionId);
       case "writeFiles":
         return await writeFiles(sessionId, params.files);
+      case "writeLogo":
+        return await writeLogo(sessionId, params.logoUrl);
       case "runCommand":
         return await runCommand(sessionId, params.command, params.args);
       case "startDevServer":
@@ -1239,6 +1241,78 @@ export default function ${name}() {
     return NextResponse.json({
       success: false,
       error: error instanceof Error ? error.message : "Unknown error writing files",
+    }, { status: 500 });
+  }
+}
+
+/**
+ * Write logo image to sandbox public folder
+ */
+async function writeLogo(sessionId: string, logoUrl: string) {
+  const sandbox = activeSandboxes.get(sessionId);
+  if (!sandbox) {
+    console.error(`[E2B] writeLogo - Sandbox not found for session: ${sessionId}`);
+    return NextResponse.json(
+      { error: "Sandbox not found. Create one first." },
+      { status: 404 }
+    );
+  }
+
+  if (!logoUrl) {
+    console.log("[E2B] writeLogo - No logo URL provided, skipping");
+    return NextResponse.json({
+      success: true,
+      message: "No logo URL provided, skipped",
+    });
+  }
+
+  console.log(`[E2B] Writing logo to sandbox for session: ${sessionId}`);
+  console.log(`[E2B] Logo URL: ${logoUrl.substring(0, 100)}...`);
+
+  try {
+    let imageBuffer: Buffer;
+
+    // Handle data URL (base64) or remote URL
+    if (logoUrl.startsWith("data:")) {
+      // Extract base64 data from data URL
+      const base64Data = logoUrl.split(",")[1];
+      imageBuffer = Buffer.from(base64Data, "base64");
+    } else {
+      // Fetch from remote URL (Firebase Storage or other)
+      const response = await fetch(logoUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch logo: ${response.status}`);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      imageBuffer = Buffer.from(arrayBuffer);
+    }
+
+    // Ensure public directory exists
+    await sandbox.files.makeDir("/home/user/project/public");
+
+    // Write logo as binary file
+    const arrayBuffer = imageBuffer.buffer.slice(
+      imageBuffer.byteOffset,
+      imageBuffer.byteOffset + imageBuffer.byteLength
+    ) as ArrayBuffer;
+
+    await sandbox.files.write([{
+      path: "/home/user/project/public/logo_image.png",
+      data: arrayBuffer,
+    }]);
+
+    console.log(`[E2B] Successfully wrote logo (${imageBuffer.length} bytes) to public/logo_image.png`);
+
+    return NextResponse.json({
+      success: true,
+      message: "Logo written successfully",
+      size: imageBuffer.length,
+    });
+  } catch (error) {
+    console.error("[E2B] Error writing logo:", error);
+    return NextResponse.json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error writing logo",
     }, { status: 500 });
   }
 }

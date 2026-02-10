@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
         }
 
         // Create temp directory for the project
-        const tempDir = join(tmpdir(), `launchpad-${projectName}-${Date.now()}`);
+        const tempDir = join(tmpdir(), `LaunchKit-${projectName}-${Date.now()}`);
         mkdirSync(tempDir, { recursive: true });
 
         try {

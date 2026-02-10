@@ -9,7 +9,7 @@ const genAI = new GoogleGenAI({
 export const MODELS = {
   PRO: "gemini-3-pro-preview",        // Text generation
   IMAGE: "gemini-3-pro-image-preview", // Image generation
-  FLASH: "gemini-2.5-flash",           // Fast/cheap option
+  FLASH: "gemini-3-flash-preview",    // Fast option
 } as const;
 
 // Generate text with Gemini 3 Pro
@@ -34,6 +34,25 @@ export async function generateJSON<T>(prompt: string, systemPrompt?: string): Pr
 
   // Clean response and parse JSON
   const cleaned = response
+    .replace(/```json\n?/g, "")
+    .replace(/```\n?/g, "")
+    .trim();
+
+  return JSON.parse(cleaned) as T;
+}
+
+// Generate JSON with Flash model (faster)
+export async function generateJSONFast<T>(prompt: string, systemPrompt?: string): Promise<T> {
+  const model = genAI.models;
+  const fullPrompt = `${systemPrompt || ""}\n\n${prompt}\n\nRespond ONLY with valid JSON, no markdown or explanation.`;
+
+  const response = await model.generateContent({
+    model: MODELS.FLASH,
+    contents: fullPrompt,
+  });
+
+  const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const cleaned = text
     .replace(/```json\n?/g, "")
     .replace(/```\n?/g, "")
     .trim();

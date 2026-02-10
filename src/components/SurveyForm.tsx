@@ -40,7 +40,7 @@ const defaultQuestions: SurveyQuestion[] = [
 ];
 
 export function SurveyForm({
-    brandName = "LaunchPad",
+    brandName = "LaunchKit",
     questions = defaultQuestions,
     onSubmit
 }: SurveyFormProps) {
@@ -130,8 +130,8 @@ export function SurveyForm({
                                     key={rating}
                                     onClick={() => handleResponse(question.id, rating)}
                                     className={`w-12 h-12 rounded-xl text-lg font-medium transition-all ${responses[question.id] === rating
-                                            ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
-                                            : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                                        ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
+                                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
                                         }`}
                                 >
                                     {rating}
@@ -148,8 +148,8 @@ export function SurveyForm({
                                     key={option}
                                     onClick={() => handleResponse(question.id, option)}
                                     className={`w-full p-3 rounded-xl text-left text-sm font-medium transition-all ${responses[question.id] === option
-                                            ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
-                                            : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
+                                        ? "bg-indigo-500 text-white shadow-lg shadow-indigo-500/30"
+                                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200"
                                         }`}
                                 >
                                     {option}

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateJSON } from "@/lib/gemini";
+import { generateJSONFast } from "@/lib/gemini";
 
 interface ColorPalette {
     id: number;
@@ -66,7 +66,7 @@ Create diverse palettes:
 4. Warm & Approachable (friendly, inviting)
 5. Dark & Premium (sophisticated, luxury feel)`;
 
-        const result = await generateJSON<{ palettes: ColorPalette[] }>(
+        const result = await generateJSONFast<{ palettes: ColorPalette[] }>(
             prompt,
             "You are a professional brand designer creating color palettes that evoke specific emotions and work well for digital products."
         );

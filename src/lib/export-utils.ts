@@ -90,7 +90,7 @@ export default defineConfig({
         "README.md",
         `# ${projectName}
 
-Generated with LaunchPad
+Generated with LaunchKit
 
 ## Getting Started
 
@@ -217,7 +217,7 @@ export async function pushToGitHub(
             body: JSON.stringify({
                 name: options.repoName,
                 private: options.isPrivate ?? false,
-                description: options.description || "Created with LaunchPad",
+                description: options.description || "Created with LaunchKit",
                 auto_init: true,
             }),
         });

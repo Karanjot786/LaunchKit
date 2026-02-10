@@ -69,7 +69,7 @@ export function ExportPanel({ files, projectName, isOpen, onClose }: ExportPanel
                 token: githubToken,
                 repoName,
                 isPrivate: isPrivateRepo,
-                description: `${projectName} - Created with LaunchPad`,
+                description: `${projectName} - Created with LaunchKit`,
             });
             setResult(result);
         } catch (error) {

@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Undo2, Redo2, Clock, Download, Rocket, ChevronLeft, Plus, MessageSquare } from "lucide-react";
 import { ChatPanel } from "./ChatPanel";
 import { PreviewTab } from "./PreviewTab";
 import { V0CodeView } from "./V0CodeView";
@@ -14,6 +16,14 @@ import { Button } from "@/components/ui/button";
 import { E2BSandbox, getTemplateFiles } from "@/lib/e2b-client";
 import { useVersionHistory } from "@/lib/version-history";
 import { useStreamingBuilder } from "@/hooks/useStreamingBuilder";
+import {
+    ChatSession,
+    ChatMessage as FirebaseChatMessage,
+    getChatSessions,
+    createChatSession,
+    getSessionMessages,
+    addSessionMessage
+} from "@/lib/firebase";
 
 interface BrandContext {
     name: string;
@@ -33,6 +43,9 @@ interface BrandContext {
         proposedFeatures?: { title: string; description: string; priority: string }[];
     };
     idea?: string;
+    validationMode?: "quick" | "deep";
+    selectedModel?: string;
+    selectedFeatures?: { id?: string; title: string; description?: string; category?: string }[];
 }
 
 interface Message {
@@ -127,6 +140,15 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
     const [isLoading, setIsLoading] = useState(false);
     const [thinkingTime, setThinkingTime] = useState(0);
 
+    // Chat session state
+    const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+    const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+    const [sessionsLoaded, setSessionsLoaded] = useState(false);
+
+    // Brand Panel state (must be before session effects that reference it)
+    const [brandPanelCollapsed, setBrandPanelCollapsed] = useState(false);
+    const [currentBrand, setCurrentBrand] = useState(brandContext);
+
     // Load template files on mount so code view shows the base template
     useEffect(() => {
         async function loadTemplateFiles() {
@@ -143,13 +165,101 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         loadTemplateFiles();
     }, []);
 
-    // Brand Panel state
-    const [brandPanelCollapsed, setBrandPanelCollapsed] = useState(false);
-    const [currentBrand, setCurrentBrand] = useState(brandContext);
+    // Load chat sessions on mount
+    useEffect(() => {
+        if (!projectId || sessionsLoaded) return;
+
+        const currentProjectId = projectId; // Capture for closure
+
+        async function loadSessions() {
+            try {
+                const sessions = await getChatSessions(currentProjectId);
+
+                if (sessions.length === 0) {
+                    // Create first chat session
+                    const sessionId = await createChatSession(currentProjectId, "Chat 1");
+                    setChatSessions([{ id: sessionId, projectId: currentProjectId, name: "Chat 1" }]);
+                    setActiveSessionId(sessionId);
+                } else {
+                    setChatSessions(sessions);
+                    const firstSessionId = sessions[0].id;
+                    setActiveSessionId(firstSessionId || null);
+
+                    if (firstSessionId) {
+                        const sessionMessages = await getSessionMessages(currentProjectId, firstSessionId);
+                        if (sessionMessages.length > 0) {
+                            const loadedMessages: Message[] = sessionMessages.map(m => ({
+                                id: m.id || crypto.randomUUID(),
+                                role: m.role,
+                                content: m.content,
+                                files: m.files,
+                                suggestions: m.suggestions,
+                                brandSuggestions: m.brandSuggestions,
+                            }));
+                            setMessages(loadedMessages);
+                        }
+                    }
+                }
+                setSessionsLoaded(true);
+            } catch (error) {
+                console.error("[BuilderLayout] Error loading chat sessions:", error);
+                setSessionsLoaded(true);
+            }
+        }
+
+        loadSessions();
+    }, [projectId, sessionsLoaded]);
+
+    // Handle switching chat sessions
+    const handleSwitchSession = useCallback(async (sessionId: string) => {
+        if (!projectId || sessionId === activeSessionId) return;
+
+        setActiveSessionId(sessionId);
+        setIsLoading(true);
+
+        try {
+            const sessionMessages = await getSessionMessages(projectId, sessionId);
+            if (sessionMessages.length > 0) {
+                const loadedMessages: Message[] = sessionMessages.map(m => ({
+                    id: m.id || crypto.randomUUID(),
+                    role: m.role,
+                    content: m.content,
+                    files: m.files,
+                    suggestions: m.suggestions,
+                    brandSuggestions: m.brandSuggestions,
+                }));
+                setMessages(loadedMessages);
+            } else {
+                // Empty session - show initial message
+                setMessages([getInitialMessage(currentBrand)]);
+            }
+        } catch (error) {
+            console.error("[BuilderLayout] Error loading session messages:", error);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [projectId, activeSessionId, currentBrand]);
+
+    // Handle creating new chat session
+    const handleNewChat = useCallback(async () => {
+        if (!projectId) return;
+
+        try {
+            const newSessionName = `Chat ${chatSessions.length + 1}`;
+            const sessionId = await createChatSession(projectId, newSessionName);
+            const newSession: ChatSession = { id: sessionId, projectId, name: newSessionName };
+
+            setChatSessions(prev => [...prev, newSession]);
+            setActiveSessionId(sessionId);
+            setMessages([getInitialMessage(currentBrand)]);
+        } catch (error) {
+            console.error("[BuilderLayout] Error creating new chat session:", error);
+        }
+    }, [projectId, chatSessions.length, currentBrand]);
 
     // Brand suggestions state (for preview area)
     const [brandSuggestions, setBrandSuggestions] = useState<{
-        type: "names" | "colors" | "logos" | null;
+        type: "names" | "colors" | "logos" | "features" | null;
         data: unknown[];
     }>({ type: null, data: [] });
 
@@ -280,9 +390,22 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         };
     }, [files, onProjectUpdate]);
 
-    // Initialize sandbox on mount (E2B first, WebContainer fallback)
+    // Initialize sandbox only after brand prerequisites are complete
+    const hasValidation = currentBrand.validation && Object.keys(currentBrand.validation).length > 0 && currentBrand.validation.category;
+    const hasName = currentBrand.name && currentBrand.name !== "Untitled Project";
+    const hasColors = currentBrand.colorPalette.primary !== "#6366F1";
+    const hasLogo = currentBrand.logo && currentBrand.logo.length > 0;
+    const isBrandReady = hasValidation && hasName && hasColors && hasLogo;
+
     useEffect(() => {
         if (containerInitialized.current) return;
+
+        // Don't initialize sandbox until brand is ready (validation + name + colors + logo)
+        if (!isBrandReady) {
+            console.log("[LaunchKit] Waiting for brand prerequisites (validation, name, colors, logo)...");
+            return;
+        }
+
         containerInitialized.current = true;
 
         const init = async () => {
@@ -290,7 +413,7 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
             if (useE2B) {
                 try {
                     setContainerStatus("Creating E2B sandbox...");
-                    console.log("[LaunchPad] Creating E2B cloud sandbox...");
+                    console.log("[LaunchKit] Brand ready! Creating E2B cloud sandbox...");
 
                     const sandbox = new E2BSandbox({
                         onStatusChange: setContainerStatus,
@@ -310,7 +433,7 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
 
                     const success = await sandbox.initialize();
                     if (success) {
-                        console.log("[LaunchPad] E2B sandbox ready! Setting isSandboxReady=true");
+                        console.log("[LaunchKit] E2B sandbox ready! Setting isSandboxReady=true");
                         setIsSandboxReady(true); // This triggers the file writing effect
                         setContainerStatus("Sandbox ready, waiting for code...");
                         return;
@@ -330,7 +453,7 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         };
 
         init();
-    }, [useE2B]);
+    }, [useE2B, isBrandReady]);
 
     // Initial files are handled by E2B sandbox creation
 
@@ -357,7 +480,11 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                     const res = await fetch("/api/validate", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ idea: currentBrand.idea }),
+                        body: JSON.stringify({
+                            idea: currentBrand.idea,
+                            mode: currentBrand.validationMode || "quick",
+                            model: currentBrand.selectedModel || "gemini-3-flash-preview"
+                        }),
                     });
                     const data = await res.json();
 
@@ -374,19 +501,20 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                             onProjectUpdate({ validation: validationData });
                         }
 
-                        // Add success message with name suggestions prompt
+                        // Add success message with feature suggestions prompt
                         const category = validationData.category?.primary || "your niche";
                         const audience = validationData.category?.targetAudience || "your target users";
+                        const proposedFeatures = validationData.proposedFeatures?.slice(0, 3) || [];
 
                         setMessages(prev => [...prev, {
                             id: Date.now().toString(),
                             role: "assistant" as const,
-                            content: `✅ **Validation Complete!**\n\nYour idea is in the **${category}** space, targeting **${audience}**.\n\nLet's create your brand! Say **"suggest names"** or describe the vibe you want.`,
+                            content: `✅ **Validation Complete!**\n\nYour idea is in the **${category}** space, targeting **${audience}**.\n\n${proposedFeatures.length > 0 ? `**Suggested Features:**\n${proposedFeatures.map((f: { title: string; description: string }) => `• **${f.title}** - ${f.description}`).join('\n')}\n\n` : ''}Let's pick your features! Say **"suggest features"** or select from below.`,
                             thinking: Math.round((Date.now() - startTime) / 1000),
                             suggestions: [
-                                { label: "Suggest names", action: "suggest names for my brand" },
-                                { label: "Modern & minimal", action: "suggest modern minimal brand names" },
-                                { label: "Fun & playful", action: "suggest fun playful brand names" },
+                                { label: "Suggest features", action: "suggest features for my startup" },
+                                { label: "Core MVP features", action: "suggest essential MVP features only" },
+                                { label: "Skip to branding", action: "skip features and suggest brand names" },
                             ],
                         }]);
                     } else {
@@ -414,11 +542,12 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
     }, [currentBrand.validation, currentBrand.idea, onProjectUpdate]);
 
     // Handle brand step trigger from panel
-    const handleTriggerBrandStep = useCallback((step: "name" | "colors" | "logo") => {
+    const handleTriggerBrandStep = useCallback((step: "name" | "colors" | "logo" | "features") => {
         const prompts: Record<string, string> = {
             name: "suggest new brand names for my project",
             colors: "suggest different color palettes for my brand",
             logo: "generate new logo options for my brand",
+            features: "brainstorm innovative features for my product based on the validation",
         };
 
         // Simulate user sending the request
@@ -459,6 +588,18 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         setIsLoading(true);
         setThinkingTime(0);
 
+        // Persist user message to Firestore
+        if (projectId && activeSessionId) {
+            try {
+                await addSessionMessage(projectId, activeSessionId, {
+                    role: "user",
+                    content,
+                });
+            } catch (error) {
+                console.error("[BuilderLayout] Error saving user message:", error);
+            }
+        }
+
         const startTime = Date.now();
         const timer = setInterval(() => {
             setThinkingTime(Math.round((Date.now() - startTime) / 1000));
@@ -468,11 +609,56 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
 
         try {
             // Detect brand-related requests and route to dedicated APIs
+            const isFeatureRequest = lowerContent.includes("feature") && (lowerContent.includes("suggest") || lowerContent.includes("brainstorm") || lowerContent.includes("mvp"));
             const isNameRequest = lowerContent.includes("name") && (lowerContent.includes("suggest") || lowerContent.includes("generate"));
             const isColorRequest = lowerContent.includes("color") && (lowerContent.includes("suggest") || lowerContent.includes("generate") || lowerContent.includes("palette"));
             const isLogoRequest = lowerContent.includes("logo") && (lowerContent.includes("generate") || lowerContent.includes("create"));
 
-            if (isNameRequest) {
+            if (isFeatureRequest) {
+                // Call features API
+                const res = await fetch("/api/features", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        action: "brainstorm",
+                        validationData: currentBrand.validation,
+                        model: currentBrand.selectedModel || "gemini-3-flash-preview",
+                    }),
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    const { mvp, stretch, moonshots } = data.data;
+                    const allFeatures = [...mvp, ...stretch, ...moonshots];
+
+                    // Set brand suggestions to show features in preview
+                    setBrandSuggestions({ type: "features", data: allFeatures });
+
+                    setMessages((prev) => [...prev, {
+                        id: Date.now().toString(),
+                        role: "assistant" as const,
+                        content: `🚀 **Feature Brainstorm Complete!**\n\n**MVP Features (${mvp.length}):**\n${mvp.slice(0, 3).map((f: { title: string }) => `• ${f.title}`).join('\n')}\n\n**Nice-to-Have (${stretch.length}):**\n${stretch.slice(0, 2).map((f: { title: string }) => `• ${f.title}`).join('\n')}\n\n**Moonshots (${moonshots.length}):**\n${moonshots.slice(0, 2).map((f: { title: string }) => `• ${f.title}`).join('\n')}\n\nSelect features from the preview panel, then say **"suggest names"** to continue!`,
+                        thinking: Math.round((Date.now() - startTime) / 1000),
+                        suggestions: [
+                            { label: "Suggest names", action: "suggest names for my brand" },
+                            { label: "More features", action: "suggest more innovative features" },
+                        ],
+                    }]);
+
+                    // Store features in brand context
+                    setCurrentBrand(prev => ({
+                        ...prev,
+                        selectedFeatures: mvp.map((f: { title: string; description: string }, i: number) => ({
+                            id: `mvp-${i}`,
+                            title: f.title,
+                            description: f.description,
+                            category: "MVP"
+                        }))
+                    }));
+                } else {
+                    throw new Error(data.error || "Failed to brainstorm features");
+                }
+            } else if (isNameRequest) {
                 // Call names API
                 const res = await fetch("/api/brand/names", {
                     method: "POST",
@@ -605,8 +791,31 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
         } finally {
             clearInterval(timer);
             setIsLoading(false);
+
+            // Persist new assistant messages to Firestore
+            if (projectId && activeSessionId) {
+                setMessages((currentMessages) => {
+                    // Find all messages after the user's message that haven't been persisted
+                    const userMsgIndex = currentMessages.findIndex(m => m.id === userMessage.id);
+                    if (userMsgIndex >= 0) {
+                        const newAssistantMessages = currentMessages.slice(userMsgIndex + 1).filter(m => m.role === "assistant");
+                        for (const msg of newAssistantMessages) {
+                            const messageData: { role: "assistant"; content: string; suggestions?: Array<{ label: string; action: string }> } = {
+                                role: "assistant",
+                                content: msg.content,
+                            };
+                            if (msg.suggestions) {
+                                messageData.suggestions = msg.suggestions;
+                            }
+                            addSessionMessage(projectId, activeSessionId!, messageData)
+                                .catch(err => console.error("[BuilderLayout] Error saving assistant message:", err));
+                        }
+                    }
+                    return currentMessages; // Don't modify state
+                });
+            }
         }
-    }, [currentBrand, files, isContainerReady, onProjectUpdate, streaming]);
+    }, [currentBrand, files, isContainerReady, onProjectUpdate, streaming, projectId, activeSessionId]);
 
     const handleFileChange = async (file: string, content: string) => {
         setFiles((prev) => ({ ...prev, [file]: content }));
@@ -620,53 +829,103 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
     };
 
     return (
-        <div className="flex flex-col h-screen bg-zinc-950">
-            {/* Header */}
-            <header className="h-14 border-b border-zinc-800 flex items-center justify-between px-4">
-                <div className="flex items-center gap-4">
+        <div className="flex flex-col h-screen bg-[#0a0a0a] relative">
+            {/* Ambient background */}
+            <div className="fixed inset-0 pointer-events-none overflow-hidden">
+                <div className="absolute -top-40 -right-40 w-[500px] h-[500px] bg-gradient-to-br from-amber-500/5 via-orange-500/3 to-transparent rounded-full blur-3xl" />
+                <div className="absolute -bottom-40 -left-40 w-[400px] h-[400px] bg-gradient-to-tr from-zinc-800/30 to-transparent rounded-full blur-3xl" />
+            </div>
+
+            {/* Header - Glassmorphic Command Bar */}
+            <motion.header
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+                className="relative h-14 border-b border-zinc-800/80 flex items-center justify-between px-4 backdrop-blur-xl bg-zinc-950/70"
+            >
+                {/* Left section */}
+                <div className="flex items-center gap-3">
+                    {/* Back button */}
                     {projectId && (
-                        <a
+                        <motion.a
                             href="/dashboard"
-                            className="text-zinc-500 hover:text-white transition-colors"
+                            whileHover={{ scale: 1.05, x: -2 }}
+                            whileTap={{ scale: 0.95 }}
+                            className="flex items-center gap-1 text-zinc-500 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-zinc-800/50"
                             title="Back to Dashboard"
                         >
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                            </svg>
-                        </a>
+                            <ChevronLeft className="w-5 h-5" />
+                        </motion.a>
                     )}
-                    <div className="flex items-center gap-2">
-                        {currentBrand.logo ? (
-                            <img src={currentBrand.logo} alt="" className="w-8 h-8 rounded-lg" />
-                        ) : (
-                            <div
-                                className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold"
-                                style={{ backgroundColor: currentBrand.colorPalette.primary }}
-                            >
-                                {currentBrand.name.charAt(0)}
-                            </div>
-                        )}
-                        <span className="text-white font-medium">{currentBrand.name}</span>
+
+                    {/* Divider */}
+                    {projectId && <div className="w-px h-6 bg-zinc-800" />}
+
+                    {/* Brand Identity */}
+                    <div className="flex items-center gap-3">
+                        <motion.div
+                            whileHover={{ scale: 1.05 }}
+                            className="relative"
+                        >
+                            {currentBrand.logo ? (
+                                <img src={currentBrand.logo} alt="" className="w-9 h-9 rounded-xl border border-zinc-700/50" />
+                            ) : (
+                                <div
+                                    className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-sm border border-white/10"
+                                    style={{ background: `linear-gradient(135deg, ${currentBrand.colorPalette.primary}, ${currentBrand.colorPalette.secondary})` }}
+                                >
+                                    {currentBrand.name.charAt(0)}
+                                </div>
+                            )}
+                        </motion.div>
+                        <div className="flex flex-col">
+                            <span className="text-white font-semibold text-sm leading-tight">{currentBrand.name}</span>
+                            <span className="text-zinc-500 text-xs">Building your app</span>
+                        </div>
                     </div>
+
+                    {/* Save Status - Animated Pill */}
                     {projectId && (
-                        <span className={`text-xs px-2 py-1 rounded ${saveStatus === "saved" ? "text-green-400" :
-                            saveStatus === "saving" ? "text-yellow-400" : "text-orange-400"
-                            }`}>
-                            {saveStatus === "saved" ? "✓ Saved" :
-                                saveStatus === "saving" ? "Saving..." : "Unsaved"}
-                        </span>
+                        <motion.div
+                            key={saveStatus}
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${saveStatus === "saved"
+                                ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
+                                : saveStatus === "saving"
+                                    ? "text-amber-400 bg-amber-500/10 border-amber-500/20"
+                                    : "text-orange-400 bg-orange-500/10 border-orange-500/20"
+                                }`}
+                        >
+                            <motion.div
+                                className={`w-1.5 h-1.5 rounded-full ${saveStatus === "saved" ? "bg-emerald-400"
+                                    : saveStatus === "saving" ? "bg-amber-400"
+                                        : "bg-orange-400"
+                                    }`}
+                                animate={saveStatus === "saving" ? { scale: [1, 1.2, 1], opacity: [1, 0.6, 1] } : {}}
+                                transition={{ repeat: Infinity, duration: 1 }}
+                            />
+                            {saveStatus === "saved" ? "Saved" : saveStatus === "saving" ? "Saving..." : "Unsaved"}
+                        </motion.div>
                     )}
-                    <Badge variant="secondary" className="bg-zinc-800 text-zinc-400">
-                        {isContainerReady ? "🟢 Ready" : `⏳ ${containerStatus}`}
-                    </Badge>
+
+                    {/* Container Status Badge */}
+                    <div className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-all ${isContainerReady
+                        ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
+                        : "text-zinc-400 bg-zinc-800/50 border-zinc-700/50"
+                        }`}>
+                        <div className={`w-1.5 h-1.5 rounded-full ${isContainerReady ? "bg-emerald-400" : "bg-zinc-500 animate-pulse"}`} />
+                        {isContainerReady ? "Ready" : containerStatus.slice(0, 20)}
+                    </div>
                 </div>
-                <div className="flex items-center gap-2">
-                    {/* Undo/Redo buttons */}
-                    <div className="flex items-center border-r border-zinc-700 pr-2 mr-2">
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            className={`text-zinc-400 hover:text-white ${!canUndo ? "opacity-50 cursor-not-allowed" : ""}`}
+
+                {/* Right section */}
+                <div className="flex items-center gap-1">
+                    {/* Undo/Redo Group */}
+                    <div className="flex items-center bg-zinc-800/50 rounded-lg p-0.5 mr-2">
+                        <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                             onClick={async () => {
                                 const restored = undoChanges();
                                 if (restored) {
@@ -676,16 +935,14 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                                 }
                             }}
                             disabled={!canUndo}
+                            className={`p-2 rounded-md transition-colors ${!canUndo ? "opacity-30 cursor-not-allowed" : "hover:bg-zinc-700 text-zinc-400 hover:text-white"}`}
                             title="Undo (⌘Z)"
                         >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
-                            </svg>
-                        </Button>
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            className={`text-zinc-400 hover:text-white ${!canRedo ? "opacity-50 cursor-not-allowed" : ""}`}
+                            <Undo2 className="w-4 h-4" />
+                        </motion.button>
+                        <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                             onClick={async () => {
                                 const restored = redoChanges();
                                 if (restored) {
@@ -695,46 +952,61 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                                 }
                             }}
                             disabled={!canRedo}
+                            className={`p-2 rounded-md transition-colors ${!canRedo ? "opacity-30 cursor-not-allowed" : "hover:bg-zinc-700 text-zinc-400 hover:text-white"}`}
                             title="Redo (⌘⇧Z)"
                         >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10h-10a8 8 0 00-8 8v2m18-10l-6 6m6-6l-6-6" />
-                            </svg>
-                        </Button>
+                            <Redo2 className="w-4 h-4" />
+                        </motion.button>
                     </div>
 
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-zinc-400 hover:text-white"
+                    {/* Action Buttons */}
+                    <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
                         onClick={() => setIsHistoryPanelOpen(true)}
-                        title="Version History"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/50 transition-all text-sm"
                     >
-                        <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        History
-                    </Button>
+                        <Clock className="w-4 h-4" />
+                        <span className="hidden sm:inline">History</span>
+                    </motion.button>
 
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-zinc-400 hover:text-white"
+                    <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
                         onClick={() => setIsExportPanelOpen(true)}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800/50 transition-all text-sm"
                     >
-                        Export
-                    </Button>
-                    <Button size="sm" className="bg-white text-black hover:bg-zinc-200" onClick={() => setIsExportPanelOpen(true)}>
-                        Publish
-                    </Button>
+                        <Download className="w-4 h-4" />
+                        <span className="hidden sm:inline">Export</span>
+                    </motion.button>
+
+                    {/* Publish Button */}
+                    <motion.button
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        onClick={() => setIsExportPanelOpen(true)}
+                        className="group relative flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm overflow-hidden ml-2"
+                    >
+                        <div className="absolute inset-0 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 transition-all" />
+                        <div className="absolute inset-0 bg-gradient-to-r from-amber-400 via-orange-400 to-amber-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <Rocket className="w-4 h-4 text-black relative z-10" />
+                        <span className="text-black relative z-10">Publish</span>
+                    </motion.button>
                 </div>
-            </header>
+            </motion.header>
 
             {/* Main content with Brand Panel */}
             <div className="flex flex-1 overflow-hidden">
                 {/* Brand Panel - Left */}
                 <BrandPanel
-                    project={currentBrand}
+                    project={{
+                        ...currentBrand,
+                        features: currentBrand.selectedFeatures?.map((f: { id?: string; title: string }) => ({
+                            id: f.id || f.title,
+                            title: f.title,
+                            selected: true
+                        })) || []
+                    }}
                     onTriggerStep={handleTriggerBrandStep}
                     collapsed={brandPanelCollapsed}
                     onToggleCollapse={() => setBrandPanelCollapsed(!brandPanelCollapsed)}
@@ -749,40 +1021,76 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                         isLoading={isLoading}
                         thinkingTime={thinkingTime}
                         brandName={currentBrand.name}
+                        sessions={chatSessions}
+                        activeSessionId={activeSessionId}
+                        onNewChat={handleNewChat}
+                        onSwitchSession={handleSwitchSession}
                     />
                 </div>
 
                 {/* Preview/Code Panel - Right */}
-                <div className="flex-1 flex flex-col">
-                    {/* Tab bar */}
-                    <div className="h-12 bg-zinc-900 border-b border-zinc-800 flex items-center px-4 gap-2">
-                        <button
-                            onClick={() => setActiveTab("preview")}
-                            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${activeTab === "preview"
-                                ? "bg-zinc-800 text-white"
-                                : "text-zinc-400 hover:text-white"
-                                }`}
-                        >
-                            ● Preview
-                        </button>
-                        <button
-                            onClick={() => setActiveTab("code")}
-                            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors ${activeTab === "code"
-                                ? "bg-zinc-800 text-white"
-                                : "text-zinc-400 hover:text-white"
-                                }`}
-                        >
-                            {"</>"} Code
-                        </button>
-                        <span className="ml-auto text-xs text-zinc-500">
-                            {containerStatus}
-                        </span>
+                <div className="flex-1 flex flex-col bg-[#0a0a0a]">
+                    {/* Premium Tab bar */}
+                    <div className="h-12 bg-zinc-900/50 border-b border-zinc-800/80 flex items-center justify-between px-4">
+                        <div className="flex items-center gap-1 bg-zinc-800/50 p-1 rounded-xl">
+                            <motion.button
+                                onClick={() => setActiveTab("preview")}
+                                whileHover={{ scale: 1.02 }}
+                                whileTap={{ scale: 0.98 }}
+                                className={`relative flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === "preview"
+                                    ? "text-white"
+                                    : "text-zinc-400 hover:text-zinc-300"
+                                    }`}
+                            >
+                                {activeTab === "preview" && (
+                                    <motion.div
+                                        layoutId="activeTab"
+                                        className="absolute inset-0 bg-zinc-700 rounded-lg"
+                                        initial={false}
+                                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                    />
+                                )}
+                                <span className="relative flex items-center gap-2">
+                                    <span className={`w-2 h-2 rounded-full ${activeTab === "preview" ? "bg-amber-400" : "bg-zinc-500"}`} />
+                                    Preview
+                                </span>
+                            </motion.button>
+                            <motion.button
+                                onClick={() => setActiveTab("code")}
+                                whileHover={{ scale: 1.02 }}
+                                whileTap={{ scale: 0.98 }}
+                                className={`relative flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === "code"
+                                    ? "text-white"
+                                    : "text-zinc-400 hover:text-zinc-300"
+                                    }`}
+                            >
+                                {activeTab === "code" && (
+                                    <motion.div
+                                        layoutId="activeTab"
+                                        className="absolute inset-0 bg-zinc-700 rounded-lg"
+                                        initial={false}
+                                        transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                                    />
+                                )}
+                                <span className="relative">{"</>"} Code</span>
+                            </motion.button>
+                        </div>
+
+                        {/* Status indicator */}
+                        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-all ${containerStatus === "Ready"
+                            ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
+                            : "text-zinc-400 bg-zinc-800/50 border-zinc-700/50"
+                            }`}>
+                            <div className={`w-1.5 h-1.5 rounded-full ${containerStatus === "Ready" ? "bg-emerald-400" : "bg-zinc-500 animate-pulse"
+                                }`} />
+                            <span className="hidden sm:inline">{containerStatus}</span>
+                        </div>
                     </div>
 
                     {/* Content */}
                     {activeTab === "preview" ? (
-                        // Show brand setup preview when no code exists OR when showing brand suggestions
-                        Object.keys(files).length === 0 || brandSuggestions.type ? (
+                        // Show brand setup preview when brand is not ready OR when showing brand suggestions
+                        !isBrandReady || brandSuggestions.type ? (
                             <BrandSetupPreview
                                 brand={currentBrand}
                                 isValidating={isLoading && !brandSuggestions.type}
@@ -814,9 +1122,48 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                                         ],
                                     }]);
                                 }}
-                                onSelectLogo={(logoUrl) => {
+                                onSelectLogo={async (logoUrl) => {
                                     handleBrandSelect("logos", logoUrl);
                                     setBrandSuggestions({ type: null, data: [] });
+
+                                    // Upload only the selected logo to Storage
+                                    if (projectId) {
+                                        try {
+                                            const res = await fetch("/api/brand/logo/upload", {
+                                                method: "POST",
+                                                headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ projectId, logoDataUrl: logoUrl }),
+                                            });
+                                            const data = await res.json();
+                                            if (data.success && data.url !== logoUrl) {
+                                                // Update with the Storage URL
+                                                handleBrandSelect("logos", data.url);
+                                            }
+                                        } catch (err) {
+                                            console.error("[BuilderLayout] Error uploading selected logo:", err);
+                                        }
+                                    }
+
+                                    // Write logo to sandbox as a reusable asset
+                                    const sandbox = e2bSandboxRef.current;
+                                    if (sandbox && sandbox.isReady) {
+                                        try {
+                                            // Write an SVG wrapper or CSS that embeds the logo
+                                            const logoCSS = `/* Brand Logo - Auto-generated */\n.brand-logo {\n  background-image: url("${logoUrl}");\n  background-size: contain;\n  background-repeat: no-repeat;\n  background-position: center;\n}\n`;
+                                            await sandbox.writeFiles({
+                                                "src/assets/brand-logo.css": logoCSS,
+                                            });
+                                            // Also update local files state
+                                            setFiles(prev => ({
+                                                ...prev,
+                                                "src/assets/brand-logo.css": logoCSS,
+                                            }));
+                                            console.log("[BuilderLayout] Logo written to sandbox");
+                                        } catch (err) {
+                                            console.error("[BuilderLayout] Error writing logo to sandbox:", err);
+                                        }
+                                    }
+
                                     setMessages((prev) => [...prev, {
                                         id: Date.now().toString(),
                                         role: "assistant" as const,
@@ -824,6 +1171,26 @@ export function BuilderLayout({ brandContext, projectId, onProjectUpdate, initia
                                         suggestions: [
                                             { label: "Build landing page", action: "create a landing page for my startup" },
                                             { label: "Generate social ads", action: "create social media ad designs" },
+                                        ],
+                                    }]);
+                                }}
+                                onSelectFeatures={(features) => {
+                                    setCurrentBrand(prev => ({
+                                        ...prev,
+                                        selectedFeatures: features
+                                    }));
+                                    setBrandSuggestions({ type: null, data: [] });
+                                    if (onProjectUpdate) {
+                                        onProjectUpdate({ selectedFeatures: features });
+                                    }
+                                    setMessages((prev) => [...prev, {
+                                        id: Date.now().toString(),
+                                        role: "assistant" as const,
+                                        content: `✅ **${features.length} features selected!**\n\n${features.slice(0, 3).map((f: { title: string }) => "• " + f.title).join("\n")}${features.length > 3 ? "\n• ...and " + (features.length - 3) + " more" : ""}\n\nNow let's name your brand! Say **"suggest names"** or describe the vibe you want.`,
+                                        suggestions: [
+                                            { label: "Suggest names", action: "suggest names for my brand" },
+                                            { label: "Modern & minimal", action: "suggest modern minimal brand names" },
+                                            { label: "Fun & playful", action: "suggest fun playful brand names" },
                                         ],
                                     }]);
                                 }}

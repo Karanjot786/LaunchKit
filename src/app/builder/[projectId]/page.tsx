@@ -106,6 +106,8 @@ export default function BuilderProjectPage() {
             opportunities: string[];
         },
         idea: project.idea,
+        validationMode: project.validationMode || "quick",
+        selectedModel: project.selectedModel || "gemini-3-flash-preview",
     };
 
     return (

@@ -89,7 +89,7 @@ export function AuthModal({ open, onClose, onSuccess }: AuthModalProps) {
                                     <span className="text-2xl">🚀</span>
                                 </div>
                                 <h2 className="text-2xl font-bold text-white mb-2">
-                                    Continue to LaunchPad
+                                    Continue to LaunchKit
                                 </h2>
                                 <p className="text-zinc-400">
                                     Sign in to save your project and start building

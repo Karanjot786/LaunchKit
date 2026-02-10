@@ -6,7 +6,7 @@ import { BuilderLayout } from "@/components/builder/BuilderLayout";
 
 // Default brand context
 const defaultBrandContext = {
-    name: "LaunchPad",
+    name: "LaunchKit",
     tagline: "From idea to launch in minutes",
     logo: null,
     colorPalette: {
@@ -44,7 +44,7 @@ function BuilderContent() {
     useEffect(() => {
         setMounted(true);
         // Get brand context from localStorage
-        const stored = localStorage.getItem("launchpad_brand_context");
+        const stored = localStorage.getItem("LaunchKit_brand_context");
         if (stored) {
             try {
                 const parsed = JSON.parse(stored);

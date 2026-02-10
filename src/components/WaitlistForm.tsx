@@ -11,7 +11,7 @@ interface WaitlistFormProps {
     onSubmit?: (email: string) => Promise<void>;
 }
 
-export function WaitlistForm({ brandName = "LaunchPad", onSubmit }: WaitlistFormProps) {
+export function WaitlistForm({ brandName = "LaunchKit", onSubmit }: WaitlistFormProps) {
     const [email, setEmail] = useState("");
     const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
     const [message, setMessage] = useState("");

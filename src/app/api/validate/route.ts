@@ -3,7 +3,11 @@ import { runValidationPipeline, type EnhancedValidationResult } from "@/lib/vali
 
 export async function POST(request: NextRequest) {
     try {
-        const { idea } = await request.json();
+        const {
+            idea,
+            mode = "quick",
+            model = "gemini-3-flash-preview"
+        } = await request.json();
 
         if (!idea) {
             return NextResponse.json(
@@ -12,20 +16,37 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        console.log("Starting enhanced validation for:", idea.substring(0, 50) + "...");
+        // Validate mode parameter
+        const validModes = ["quick", "deep"];
+        const selectedMode = validModes.includes(mode) ? mode : "quick";
 
-        // Run the full validation pipeline
-        const result: EnhancedValidationResult = await runValidationPipeline(idea);
+        // Validate model parameter
+        const validModels = ["gemini-3-flash-preview", "gemini-3-pro-preview"];
+        const selectedModel = validModels.includes(model) ? model : "gemini-3-flash-preview";
 
-        console.log("Validation complete. Score:", result.scores.viability);
+        console.log(`[Validate] Starting ${selectedMode} validation with ${selectedModel} for:`, idea.substring(0, 50) + "...");
+        const startTime = Date.now();
+
+        // Run the validation pipeline with selected mode and model
+        const result: EnhancedValidationResult = await runValidationPipeline(
+            idea,
+            selectedMode as "quick" | "deep",
+            selectedModel
+        );
+
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`[Validate] Complete in ${duration}s. Score: ${result.scores.viability}`);
 
         return NextResponse.json({
             success: true,
+            mode: selectedMode,
+            model: selectedModel,
+            duration: `${duration}s`,
             data: result,
         });
 
     } catch (error) {
-        console.error("Validation error:", error);
+        console.error("[Validate] Error:", error);
         return NextResponse.json(
             {
                 error: "Validation failed",

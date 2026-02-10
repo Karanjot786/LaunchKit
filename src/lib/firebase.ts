@@ -27,6 +27,7 @@ import {
     Timestamp,
     Firestore,
 } from "firebase/firestore";
+import { getStorage, ref, uploadBytes, getDownloadURL, FirebaseStorage } from "firebase/storage";
 
 // Firebase config - will be set dynamically for generated apps
 const defaultConfig = {
@@ -45,6 +46,7 @@ const isConfigured = Boolean(defaultConfig.apiKey && defaultConfig.projectId);
 let app: FirebaseApp | null = null;
 let auth: Auth | null = null;
 let db: Firestore | null = null;
+let storage: FirebaseStorage | null = null;
 
 if (isConfigured) {
     if (!getApps().length) {
@@ -54,10 +56,11 @@ if (isConfigured) {
     }
     auth = getAuth(app);
     db = getFirestore(app);
+    storage = getStorage(app);
 }
 
 // Export with null checks
-export { auth, db };
+export { auth, db, storage, ref, uploadBytes, getDownloadURL };
 
 // Helper to check if Firebase is ready
 export function isFirebaseReady(): boolean {
@@ -219,6 +222,8 @@ export interface BuilderProject {
         text: string;
     };
     validation: Record<string, unknown>;
+    validationMode?: "quick" | "deep";
+    selectedModel?: string;
     sandboxId: string | null;
     sandboxUrl: string | null;
     files: Record<string, string>;
@@ -229,10 +234,24 @@ export interface BuilderProject {
 export interface ChatMessage {
     id?: string;
     projectId: string;
+    sessionId?: string;
     role: "user" | "assistant";
     content: string;
     files?: Record<string, string>;
+    suggestions?: Array<{ label: string; action: string }>;
+    brandSuggestions?: {
+        type: "names" | "colors" | "logos";
+        data: unknown[];
+    };
     createdAt?: Timestamp;
+}
+
+export interface ChatSession {
+    id?: string;
+    projectId: string;
+    name: string;
+    createdAt?: Timestamp;
+    updatedAt?: Timestamp;
 }
 
 // Project CRUD
@@ -271,7 +290,82 @@ export async function getUserProjects(userId: string): Promise<BuilderProject[]>
     return snapshot.docs.map(d => ({ id: d.id, ...d.data() }) as BuilderProject);
 }
 
-// Message CRUD
+// Chat Session CRUD
+export async function createChatSession(projectId: string, name: string = "Chat 1"): Promise<string> {
+    if (!db) throw new Error("Firebase not configured");
+    const docRef = await addDoc(collection(db, "builder_projects", projectId, "chat_sessions"), {
+        projectId,
+        name,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+    });
+    return docRef.id;
+}
+
+export async function getChatSessions(projectId: string): Promise<ChatSession[]> {
+    if (!db) throw new Error("Firebase not configured");
+    const q = query(
+        collection(db, "builder_projects", projectId, "chat_sessions"),
+        orderBy("createdAt", "asc")
+    );
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(d => ({ id: d.id, ...d.data() }) as ChatSession);
+}
+
+export async function updateChatSession(projectId: string, sessionId: string, name: string): Promise<void> {
+    if (!db) throw new Error("Firebase not configured");
+    await updateDoc(doc(db, "builder_projects", projectId, "chat_sessions", sessionId), {
+        name,
+        updatedAt: Timestamp.now(),
+    });
+}
+
+export async function deleteChatSession(projectId: string, sessionId: string): Promise<void> {
+    if (!db) throw new Error("Firebase not configured");
+    // Delete all messages in the session first
+    const messagesSnapshot = await getDocs(
+        collection(db, "builder_projects", projectId, "chat_sessions", sessionId, "messages")
+    );
+    const deletePromises = messagesSnapshot.docs.map(d => deleteDoc(d.ref));
+    await Promise.all(deletePromises);
+    // Delete the session
+    await deleteDoc(doc(db, "builder_projects", projectId, "chat_sessions", sessionId));
+}
+
+// Session Message CRUD
+export async function addSessionMessage(
+    projectId: string,
+    sessionId: string,
+    message: Omit<ChatMessage, "id" | "projectId" | "sessionId" | "createdAt">
+): Promise<string> {
+    if (!db) throw new Error("Firebase not configured");
+    const docRef = await addDoc(
+        collection(db, "builder_projects", projectId, "chat_sessions", sessionId, "messages"),
+        {
+            projectId,
+            sessionId,
+            ...message,
+            createdAt: Timestamp.now(),
+        }
+    );
+    // Update session timestamp
+    await updateDoc(doc(db, "builder_projects", projectId, "chat_sessions", sessionId), {
+        updatedAt: Timestamp.now(),
+    });
+    return docRef.id;
+}
+
+export async function getSessionMessages(projectId: string, sessionId: string): Promise<ChatMessage[]> {
+    if (!db) throw new Error("Firebase not configured");
+    const q = query(
+        collection(db, "builder_projects", projectId, "chat_sessions", sessionId, "messages"),
+        orderBy("createdAt", "asc")
+    );
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(d => ({ id: d.id, ...d.data() }) as ChatMessage);
+}
+
+// Legacy message CRUD (keeping for backwards compatibility)
 export async function addChatMessage(projectId: string, role: "user" | "assistant", content: string, files?: Record<string, string>): Promise<string> {
     if (!db) throw new Error("Firebase not configured");
     const docRef = await addDoc(collection(db, "builder_projects", projectId, "messages"), {

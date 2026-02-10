@@ -1,10 +1,21 @@
 /**
- * Enhanced Validation Pipeline
- * Multi-step validation with AI categorization, Reddit data, and Google Search grounding
+ * Enhanced Validation Pipeline v2
+ * 
+ * Dual-mode validation using Gemini AI:
+ * - Quick Mode: Flash model with Google Search grounding (~5-10 sec)
+ * - Deep Mode: Deep Research Agent for comprehensive analysis (~1-3 min)
+ * 
+ * Output format: TOON (Token-Oriented Object Notation)
  */
 
-import { generateJSON, genAI, MODELS } from "./gemini";
-import { searchReddit, getSubredditsForCategory, type RedditPost } from "./reddit";
+import { genAI, MODELS } from "./gemini";
+import { encode as toonEncode } from "@toon-format/toon";
+import {
+    runDeepResearch,
+    getValidationPrompt,
+    VALIDATION_SYSTEM_PROMPT,
+    type ProgressCallback
+} from "./deep-research";
 
 // Types
 export interface CategoryResult {
@@ -13,15 +24,12 @@ export interface CategoryResult {
     confidence: number;
     targetAudience: string;
     keywords: string[];
-    relevantSubreddits: string[];
 }
 
 export interface CommunityData {
-    posts: RedditPost[];
-    totalEngagement: number;
     sentiment: "positive" | "mixed" | "negative";
+    engagement: "high" | "medium" | "low";
     painPoints: string[];
-    quotes: { text: string; source: string; score: number }[];
 }
 
 export interface MarketData {
@@ -53,147 +61,130 @@ export interface EnhancedValidationResult {
         description: string;
         priority: "high" | "medium" | "low";
     }[];
+    rawToon?: string;
 }
 
 /**
- * Step 1: Categorize the idea using AI
+ * Parse TOON format response into structured result
  */
-export async function categorizeIdea(idea: string): Promise<CategoryResult> {
-    const prompt = `Analyze this startup idea and categorize it:
+function parseToonValidation(toonText: string): Partial<EnhancedValidationResult> {
+    const result: Partial<EnhancedValidationResult> = {
+        rawToon: toonText,
+    };
 
-"${idea}"
+    try {
+        // Extract values using regex patterns for TOON format
+        const getValue = (key: string): string => {
+            const match = toonText.match(new RegExp(`${key}:([^\\n]+)`));
+            return match ? match[1].trim() : "";
+        };
 
-Available categories: fitness, health, fintech, entertainment, AI/ML, SaaS, e-commerce, education, gaming, social, productivity, developer-tools, travel, food, real-estate, crypto/web3
+        const getArrayValues = (key: string): string[] => {
+            const match = toonText.match(new RegExp(`${key}\\[\\d+\\]:([^\\n]+)`));
+            if (match) {
+                return match[1].split(",").map(s => s.trim());
+            }
+            return [];
+        };
 
-Return JSON:
-{
-  "primary": "<main category>",
-  "secondary": ["<category2>", "<category3>"],
-  "confidence": <0.0-1.0>,
-  "targetAudience": "<describe target users>",
-  "keywords": ["<keyword1>", "<keyword2>", "<keyword3>", "<keyword4>", "<keyword5>"],
-  "relevantSubreddits": ["<subreddit1>", "<subreddit2>", "<subreddit3>"]
-}`;
+        // Parse category
+        result.category = {
+            primary: getValue("primary") || "startup",
+            secondary: getArrayValues("secondary"),
+            confidence: parseFloat(getValue("confidence")) || 0.5,
+            targetAudience: getValue("audience") || "",
+            keywords: getArrayValues("keywords"),
+        };
 
-    const result = await generateJSON<CategoryResult>(
-        prompt,
-        "You are a startup analyst classifying business ideas."
-    );
+        // Parse community
+        const sentiment = getValue("sentiment") as "positive" | "mixed" | "negative";
+        const engagement = getValue("engagement") as "high" | "medium" | "low";
+        result.community = {
+            sentiment: sentiment || "mixed",
+            engagement: engagement || "medium",
+            painPoints: getArrayValues("painPoints"),
+        };
 
-    // Ensure we have subreddits from our mapping too
-    const mappedSubreddits = getSubredditsForCategory(result.primary);
-    result.relevantSubreddits = [
-        ...new Set([...result.relevantSubreddits, ...mappedSubreddits]),
-    ].slice(0, 5);
+        // Parse market
+        result.market = {
+            size: getValue("size") || "Unknown",
+            growth: getValue("growth") || "Unknown",
+            competitors: [],
+            trends: getArrayValues("trends"),
+            sources: [],
+        };
+
+        // Parse competitors (multi-line block)
+        const competitorMatches = toonText.matchAll(/name:([^\n]+)\n\s*description:([^\n]+)/g);
+        const competitors: { name: string; description: string }[] = [];
+        for (const match of competitorMatches) {
+            competitors.push({
+                name: match[1].trim(),
+                description: match[2].trim(),
+            });
+        }
+        result.market.competitors = competitors;
+
+        // Parse scores
+        result.scores = {
+            viability: parseInt(getValue("viability")) || 5,
+            painPointStrength: parseInt(getValue("painPointStrength")) || 5,
+            demandLevel: parseInt(getValue("demandLevel")) || 5,
+            competitionIntensity: parseInt(getValue("competitionIntensity")) || 5,
+        };
+
+        // Parse verdict
+        const recommendation = getValue("recommendation") as "proceed" | "pivot" | "reconsider";
+        result.recommendation = recommendation || "reconsider";
+        result.verdict = getValue("summary") || "";
+
+        // Parse opportunities and risks
+        result.opportunities = getArrayValues("opportunities");
+        result.risks = getArrayValues("risks");
+
+        // Parse features (multi-line block)
+        const featureMatches = toonText.matchAll(/title:([^\n]+)\n\s*description:([^\n]+)\n\s*priority:([^\n]+)/g);
+        const features: { title: string; description: string; priority: "high" | "medium" | "low" }[] = [];
+        for (const match of featureMatches) {
+            const priority = match[3].trim() as "high" | "medium" | "low";
+            features.push({
+                title: match[1].trim(),
+                description: match[2].trim(),
+                priority: priority || "medium",
+            });
+        }
+        result.proposedFeatures = features;
+
+    } catch (error) {
+        console.warn("[Validation] Error parsing TOON response:", error);
+    }
 
     return result;
 }
 
 /**
- * Step 2: Fetch and analyze Reddit community data
+ * Quick validation using selected model with Google Search grounding
+ * ~5-10 seconds
  */
-export async function analyzeRedditCommunity(
+export async function runQuickValidation(
     idea: string,
-    category: CategoryResult
-): Promise<CommunityData> {
-    // Build search query from keywords
-    const query = category.keywords.slice(0, 3).join(" ");
-
-    // Search Reddit
-    const posts = await searchReddit(query, category.relevantSubreddits, 5);
-
-    // Calculate engagement
-    const totalEngagement = posts.reduce(
-        (sum, p) => sum + p.score + p.numComments,
-        0
-    );
-
-    // If no posts found, return empty data
-    if (posts.length === 0) {
-        return {
-            posts: [],
-            totalEngagement: 0,
-            sentiment: "mixed",
-            painPoints: [],
-            quotes: [],
-        };
-    }
-
-    // Use AI to analyze the Reddit posts
-    const redditContext = posts
-        .map(
-            (p) =>
-                `[r/${p.subreddit}] "${p.title}" (${p.score}↑, ${p.numComments} comments)\n${p.selftext.slice(0, 300)}`
-        )
-        .join("\n\n");
-
-    const analysisPrompt = `Analyze these Reddit discussions related to the idea "${idea}":
-
-${redditContext}
-
-Extract:
-1. Overall sentiment (positive/mixed/negative)
-2. Pain points users mention
-3. Notable quotes (with source subreddit)
-
-Return JSON:
-{
-  "sentiment": "positive" | "mixed" | "negative",
-  "painPoints": ["<pain1>", "<pain2>", "<pain3>"],
-  "quotes": [
-    {"text": "<quote>", "source": "<subreddit>", "score": <upvotes>}
-  ]
-}`;
-
-    const analysis = await generateJSON<{
-        sentiment: "positive" | "mixed" | "negative";
-        painPoints: string[];
-        quotes: { text: string; source: string; score: number }[];
-    }>(analysisPrompt, "You are analyzing community sentiment from Reddit discussions.");
-
-    return {
-        posts,
-        totalEngagement,
-        sentiment: analysis.sentiment,
-        painPoints: analysis.painPoints,
-        quotes: analysis.quotes,
-    };
-}
-
-/**
- * Step 3: Get market data using Google Search grounding
- */
-export async function getMarketData(
-    idea: string,
-    category: string
-): Promise<MarketData> {
+    modelName: string = MODELS.FLASH,
+    onProgress?: (step: string, progress: number) => void
+): Promise<EnhancedValidationResult> {
     const model = genAI.models;
 
+    onProgress?.("Starting quick validation...", 10);
+
     const response = await model.generateContent({
-        model: MODELS.PRO,
-        contents: `Research market data for this startup idea in the ${category} space:
-
-"${idea}"
-
-Find current information on:
-1. Market size (TAM, SAM, SOM if available)
-2. Market growth rate and projections
-3. Top 5 competitors with brief descriptions
-4. Recent industry trends (2024-2025)
-
-Format as JSON:
-{
-  "size": "<market size estimate>",
-  "growth": "<growth rate/projection>",
-  "competitors": [{"name": "<name>", "description": "<brief desc>"}],
-  "trends": ["<trend1>", "<trend2>", "<trend3>"]
-}`,
+        model: modelName,
+        contents: `${VALIDATION_SYSTEM_PROMPT}\n\n${getValidationPrompt(idea)}`,
         config: {
             tools: [{ googleSearch: {} }],
         },
     });
 
-    // Parse the response
+    onProgress?.("Parsing results...", 80);
+
     const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "";
     const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks?.map(
         (chunk: { web?: { uri?: string; title?: string } }) => ({
@@ -202,128 +193,128 @@ Format as JSON:
         })
     ) || [];
 
-    // Clean and parse JSON from response
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    let parsed: Partial<MarketData> = {};
+    // Parse TOON response
+    const parsed = parseToonValidation(text);
 
-    if (jsonMatch) {
-        try {
-            parsed = JSON.parse(jsonMatch[0]);
-        } catch {
-            console.warn("Failed to parse market data JSON");
-        }
+    // Add grounding sources
+    if (parsed.market) {
+        parsed.market.sources = sources;
     }
-
-    return {
-        size: parsed.size || "Market size data unavailable",
-        growth: parsed.growth || "Growth data unavailable",
-        competitors: parsed.competitors || [],
-        trends: parsed.trends || [],
-        sources,
-    };
-}
-
-/**
- * Step 4: Generate final analysis and scores
- */
-export async function generateFinalAnalysis(
-    idea: string,
-    category: CategoryResult,
-    community: CommunityData,
-    market: MarketData
-): Promise<{
-    scores: ValidationScores;
-    verdict: string;
-    recommendation: "proceed" | "pivot" | "reconsider";
-    opportunities: string[];
-    risks: string[];
-    proposedFeatures: {
-        title: string;
-        description: string;
-        priority: "high" | "medium" | "low";
-    }[];
-}> {
-    const prompt = `Based on comprehensive research, analyze this startup idea:
-
-IDEA: "${idea}"
-
-CATEGORY: ${category.primary} (also: ${category.secondary.join(", ")})
-TARGET AUDIENCE: ${category.targetAudience}
-
-COMMUNITY DATA:
-- Posts analyzed: ${community.posts.length}
-- Total engagement: ${community.totalEngagement}
-- Sentiment: ${community.sentiment}
-- Pain points: ${community.painPoints.join(", ")}
-
-MARKET DATA:
-- Market size: ${market.size}
-- Growth: ${market.growth}
-- Competitors: ${market.competitors.map((c) => c.name).join(", ")}
-- Trends: ${market.trends.join(", ")}
-
-Provide comprehensive scores and analysis.
-
-Return JSON:
-{
-  "scores": {
-    "viability": <1-10>,
-    "painPointStrength": <1-10>,
-    "demandLevel": <1-10>,
-    "competitionIntensity": <1-10>
-  },
-  "verdict": "<2-3 sentence summary>",
-  "recommendation": "proceed" | "pivot" | "reconsider",
-  "opportunities": ["<opportunity1>", "<opportunity2>", "<opportunity3>"],
-  "risks": ["<risk1>", "<risk2>", "<risk3>"],
-  "proposedFeatures": [
-    { "title": "<feature name>", "description": "<what it does & why>", "priority": "high" }
-  ]
-}`;
-
-    return generateJSON<{
-        scores: ValidationScores;
-        verdict: string;
-        recommendation: "proceed" | "pivot" | "reconsider";
-        opportunities: string[];
-        risks: string[];
-        proposedFeatures: {
-            title: string;
-            description: string;
-            priority: "high" | "medium" | "low";
-        }[];
-    }>(prompt, "You are a startup advisor providing data-driven analysis.");
-}
-
-/**
- * Full validation pipeline
- */
-export async function runValidationPipeline(
-    idea: string,
-    onProgress?: (step: string, progress: number) => void
-): Promise<EnhancedValidationResult> {
-    // Step 1: Categorize
-    onProgress?.("Categorizing idea...", 10);
-    const category = await categorizeIdea(idea);
-
-    // Step 2: Reddit community analysis
-    onProgress?.("Analyzing Reddit community...", 30);
-    const community = await analyzeRedditCommunity(idea, category);
-
-    // Step 3: Market data with Google Search
-    onProgress?.("Researching market data...", 60);
-    const market = await getMarketData(idea, category.primary);
-
-    // Step 4: Final analysis
-    onProgress?.("Generating final analysis...", 85);
-    const analysis = await generateFinalAnalysis(idea, category, community, market);
 
     onProgress?.("Complete!", 100);
 
+    // Return with defaults for missing fields
     return {
-        category,
-        community,
-        market,
-        ...analysis,
+        category: parsed.category || {
+            primary: "startup",
+            secondary: [],
+            confidence: 0.5,
+            targetAudience: "",
+            keywords: [],
+        },
+        community: parsed.community || {
+            sentiment: "mixed",
+            engagement: "medium",
+            painPoints: [],
+        },
+        market: parsed.market || {
+            size: "Unknown",
+            growth: "Unknown",
+            competitors: [],
+            trends: [],
+            sources,
+        },
+        scores: parsed.scores || {
+            viability: 5,
+            painPointStrength: 5,
+            demandLevel: 5,
+            competitionIntensity: 5,
+        },
+        verdict: parsed.verdict || "",
+        recommendation: parsed.recommendation || "reconsider",
+        opportunities: parsed.opportunities || [],
+        risks: parsed.risks || [],
+        proposedFeatures: parsed.proposedFeatures || [],
+        rawToon: text,
     };
+}
+
+/**
+ * Deep validation using Deep Research Agent
+ * ~1-3 minutes, comprehensive analysis
+ */
+export async function runDeepValidation(
+    idea: string,
+    onProgress?: ProgressCallback
+): Promise<EnhancedValidationResult> {
+    // Run deep research
+    const toonResponse = await runDeepResearch(idea, onProgress);
+
+    // Parse TOON response
+    const parsed = parseToonValidation(toonResponse);
+
+    // Return with defaults for missing fields
+    return {
+        category: parsed.category || {
+            primary: "startup",
+            secondary: [],
+            confidence: 0.5,
+            targetAudience: "",
+            keywords: [],
+        },
+        community: parsed.community || {
+            sentiment: "mixed",
+            engagement: "medium",
+            painPoints: [],
+        },
+        market: parsed.market || {
+            size: "Unknown",
+            growth: "Unknown",
+            competitors: [],
+            trends: [],
+            sources: [],
+        },
+        scores: parsed.scores || {
+            viability: 5,
+            painPointStrength: 5,
+            demandLevel: 5,
+            competitionIntensity: 5,
+        },
+        verdict: parsed.verdict || "",
+        recommendation: parsed.recommendation || "reconsider",
+        opportunities: parsed.opportunities || [],
+        risks: parsed.risks || [],
+        proposedFeatures: parsed.proposedFeatures || [],
+        rawToon: toonResponse,
+    };
+}
+
+/**
+ * Main validation pipeline
+ * Supports both quick and deep modes with model selection
+ */
+export async function runValidationPipeline(
+    idea: string,
+    mode: "quick" | "deep" = "quick",
+    modelName: string = MODELS.FLASH,
+    onProgress?: (step: string, progress: number) => void
+): Promise<EnhancedValidationResult> {
+    if (mode === "deep") {
+        return runDeepValidation(idea, (update) => {
+            onProgress?.(update.text || "", update.progress || 0);
+        });
+    }
+
+    return runQuickValidation(idea, modelName, onProgress);
+}
+
+/**
+ * Encode validation result to TOON format for token-efficient storage
+ */
+export function encodeValidationToToon(result: EnhancedValidationResult): string {
+    try {
+        return toonEncode(result);
+    } catch {
+        return JSON.stringify(result, null, 2);
+    }
 }

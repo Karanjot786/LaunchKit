@@ -32,7 +32,7 @@ export interface BrandContextForToon {
  * Example output:
  * ```
  * brand
- *   name:Launchpad
+ *   name:LaunchKit
  *   tagline:Build faster
  *   colors:primary=#6366F1,secondary=#8B5CF6,accent=#F59E0B,bg=#0F172A,text=#F8FAFC
  *   audience:Developers

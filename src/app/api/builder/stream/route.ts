@@ -290,6 +290,16 @@ import { encodeBrandContext, estimateTokenCount } from "@/lib/toon";
 function buildSystemPrompt(brand: BrandContext): string {
     // Use TOON format for brand context to save tokens
     // NOTE: Logo intentionally excluded - can be huge base64 data URLs
+
+    // Use selectedFeatures if available, otherwise fall back to validation proposedFeatures
+    const featuresToUse = brand.selectedFeatures?.length
+        ? brand.selectedFeatures.map(f => ({
+            title: f.title,
+            description: f.description,
+            priority: f.category === 'mvp' ? 'high' : f.category === 'stretch' ? 'medium' : 'low'
+        }))
+        : brand.validation.proposedFeatures;
+
     const brandToon = encodeBrandContext({
         name: brand.name,
         tagline: brand.tagline,
@@ -298,7 +308,7 @@ function buildSystemPrompt(brand: BrandContext): string {
         category: brand.validation.category?.primary,
         targetAudience: brand.validation.category?.targetAudience,
         painPoints: brand.validation.community?.painPoints,
-        features: brand.validation.proposedFeatures,
+        features: featuresToUse,
     });
 
     return `You are an expert React + Firebase full-stack developer. Build complete, production-quality web applications.
@@ -326,6 +336,7 @@ shadcn/ui: button, card, input, badge, separator
 PROJECT STRUCTURE
 ═══════════════════════════════════════════════════════════════════════════════
 PRE-BUILT FILES (already exist, do NOT create):
+├── public/logo_image.png        - Brand logo image (USE THIS for logo display!)
 ├── src/lib/firebase.ts          - Firebase app initialization
 ├── src/lib/utils.ts             - cn() utility function
 ├── src/contexts/AuthContext.tsx - { useAuth, AuthProvider }
@@ -333,6 +344,10 @@ PRE-BUILT FILES (already exist, do NOT create):
 ├── src/hooks/useStorage.ts      - Firebase Storage uploads
 ├── src/components/ui/*.tsx      - shadcn/ui components
 └── src/components/auth/         - { LoginForm, SignupForm, ProtectedRoute, UserMenu }
+
+★ BRAND LOGO ★
+The brand logo is available at: /logo_image.png
+Use it in components like: <img src="/logo_image.png" alt="${brand.name} logo" />
 
 FILES YOU MUST CREATE:
 ├── src/App.tsx                  - Main app with routing (REQUIRED)
